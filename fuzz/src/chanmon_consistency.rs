@@ -309,6 +309,7 @@ fn send_payment(source: &ChanMan, dest: &ChanMan, dest_chan_id: u64, amt: u64, p
 			channel_features: ChannelFeatures::known(),
 			fee_msat: amt,
 			cltv_expiry_delta: 200,
+			path_penalty_msat: 0,
 		}]],
 		payment_params: None,
 	}, payment_hash, &Some(payment_secret)) {
@@ -328,6 +329,7 @@ fn send_hop_payment(source: &ChanMan, middle: &ChanMan, middle_chan_id: u64, des
 			channel_features: ChannelFeatures::known(),
 			fee_msat: 50000,
 			cltv_expiry_delta: 100,
+			path_penalty_msat: 0,
 		},RouteHop {
 			pubkey: dest.get_our_node_id(),
 			node_features: NodeFeatures::known(),
@@ -335,6 +337,7 @@ fn send_hop_payment(source: &ChanMan, middle: &ChanMan, middle_chan_id: u64, des
 			channel_features: ChannelFeatures::known(),
 			fee_msat: amt,
 			cltv_expiry_delta: 200,
+			path_penalty_msat: 0,
 		}]],
 		payment_params: None,
 	}, payment_hash, &Some(payment_secret)) {

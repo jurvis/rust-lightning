@@ -1242,13 +1242,13 @@ mod tests {
 						pubkey: PublicKey::from_slice(&hex::decode("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(),
 						node_features: NodeFeatures::empty(),
-						short_channel_id: 0, fee_msat: final_value_msat / 2, cltv_expiry_delta: 144
+						short_channel_id: 0, fee_msat: final_value_msat / 2, cltv_expiry_delta: 144, path_penalty_msat: 0
 					}],
 					vec![RouteHop {
 						pubkey: PublicKey::from_slice(&hex::decode("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 						channel_features: ChannelFeatures::empty(),
 						node_features: NodeFeatures::empty(),
-						short_channel_id: 1, fee_msat: final_value_msat / 2, cltv_expiry_delta: 144
+						short_channel_id: 1, fee_msat: final_value_msat / 2, cltv_expiry_delta: 144, path_penalty_msat: 0
 					}],
 				],
 				payment_params: None,
@@ -1533,6 +1533,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 10_000,
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}],
 				vec![RouteHop {
 					pubkey: nodes[1].node.get_our_node_id(),
@@ -1541,6 +1542,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 100_000_001, // Our default max-HTLC-value is 10% of the channel value, which this is one more than
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}],
 			],
 			payment_params: Some(PaymentParameters::from_node_id(nodes[1].node.get_our_node_id())),
@@ -1585,6 +1587,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 100_000_001, // Our default max-HTLC-value is 10% of the channel value, which this is one more than
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}],
 			],
 			payment_params: Some(PaymentParameters::from_node_id(nodes[1].node.get_our_node_id())),
@@ -1644,6 +1647,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 0,
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}, RouteHop {
 					pubkey: nodes[2].node.get_our_node_id(),
 					node_features: NodeFeatures::known(),
@@ -1651,6 +1655,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 100_000_000,
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}],
 				vec![RouteHop {
 					pubkey: nodes[1].node.get_our_node_id(),
@@ -1659,6 +1664,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 0,
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}, RouteHop {
 					pubkey: nodes[2].node.get_our_node_id(),
 					node_features: NodeFeatures::known(),
@@ -1666,6 +1672,7 @@ mod tests {
 					channel_features: ChannelFeatures::known(),
 					fee_msat: 100_000_000,
 					cltv_expiry_delta: 100,
+					path_penalty_msat: 0,
 				}]
 			],
 			payment_params: Some(PaymentParameters::from_node_id(nodes[2].node.get_our_node_id())),

@@ -48,6 +48,8 @@ pub struct RouteHop {
 	/// The CLTV delta added for this hop. For the last hop, this should be the full CLTV value
 	/// expected at the destination, in excess of the current block height.
 	pub cltv_expiry_delta: u32,
+	/// Penalty incurred up to this hop
+	pub path_penalty_msat: u64,
 }
 
 impl_writeable_tlv_based!(RouteHop, {
@@ -57,6 +59,7 @@ impl_writeable_tlv_based!(RouteHop, {
 	(6, channel_features, required),
 	(8, fee_msat, required),
 	(10, cltv_expiry_delta, required),
+	(12, path_penalty_msat, required)
 });
 
 /// A route directs a payment from the sender (us) to the recipient. If the recipient supports MPP,
@@ -1494,6 +1497,7 @@ where L::Target: Logger {
 				channel_features: payment_hop.candidate.features(),
 				fee_msat: payment_hop.fee_msat,
 				cltv_expiry_delta: payment_hop.candidate.cltv_expiry_delta(),
+				path_penalty_msat: payment_hop.path_penalty_msat,
 			})
 		}).collect::<Vec<_>>();
 		// Propagate the cltv_expiry_delta one hop backwards since the delta from the current hop is
@@ -4781,17 +4785,17 @@ mod tests {
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 225, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 225, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 			]],
 			payment_params: None,
@@ -4808,23 +4812,23 @@ mod tests {
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 			],vec![
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 100, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 				RouteHop {
 					pubkey: PublicKey::from_slice(&hex::decode("0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c").unwrap()[..]).unwrap(),
 					channel_features: ChannelFeatures::empty(), node_features: NodeFeatures::empty(),
-					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0
+					short_channel_id: 0, fee_msat: 150, cltv_expiry_delta: 0, path_penalty_msat: 0
 				},
 			]],
 			payment_params: None,

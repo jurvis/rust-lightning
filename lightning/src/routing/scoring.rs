@@ -1206,6 +1206,7 @@ mod tests {
 			channel_features: ChannelFeatures::known(),
 			fee_msat: 1,
 			cltv_expiry_delta: 18,
+			path_penalty_msat: 0,
 		};
 		scorer.payment_path_successful(&[&hop]);
 		assert_eq!(scorer.channel_penalty_msat(42, 1, 1, &source, &target), 1_128);
@@ -1396,6 +1397,7 @@ mod tests {
 				channel_features: ChannelFeatures::known(),
 				fee_msat: 1,
 				cltv_expiry_delta: 18,
+				path_penalty_msat: 0,
 			},
 			RouteHop {
 				pubkey: target_pubkey(),
@@ -1404,6 +1406,7 @@ mod tests {
 				channel_features: ChannelFeatures::known(),
 				fee_msat: 2,
 				cltv_expiry_delta: 18,
+				path_penalty_msat: 0,
 			},
 			RouteHop {
 				pubkey: recipient_pubkey(),
@@ -1412,6 +1415,7 @@ mod tests {
 				channel_features: ChannelFeatures::known(),
 				fee_msat: amount_msat,
 				cltv_expiry_delta: 18,
+				path_penalty_msat: 0,
 			},
 		]
 	}
