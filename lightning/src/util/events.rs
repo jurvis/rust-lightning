@@ -445,6 +445,13 @@ pub enum Event {
 		/// [`ChannelManager`]: crate::ln::channelmanager::ChannelManager
 		channel_type: ChannelTypeFeatures,
 	},
+	/// Indicates that a payment has failed to be forwarded through us
+	PaymentForwardedFailed {
+		/// The channel_id of the sender
+		source_channel_id: u64,
+		/// The node_id of the receiver where forwarding has failed
+		sink_node_id: PublicKey
+	},
 }
 
 impl Writeable for Event {
@@ -562,6 +569,13 @@ impl Writeable for Event {
 				// We never write the OpenChannelRequest events as, upon disconnection, peers
 				// drop any channels which have not yet exchanged funding_signed.
 			},
+			&Event::PaymentForwardedFailed { ref source_channel_id, ref sink_node_id } => {
+				18u8.write(writer)?;
+				write_tlv_fields!(writer, {
+					(0, source_channel_id, required),
+					(2, sink_node_id, required),
+				})
+			}
 			// Note that, going forward, all new events must only write data inside of
 			// `write_tlv_fields`. Versions 0.0.101+ will ignore odd-numbered events that write
 			// data via `write_tlv_fields`.
