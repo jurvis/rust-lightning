@@ -4019,6 +4019,10 @@ impl<Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelMana
 					pending_events.push(events::Event::PendingHTLCsForwardable {
 						time_forwardable: time
 					});
+				} else {
+					let mut pending_events = self.pending_events.lock().unwrap();
+					pending_events.push(events::Event::PaymentForwardedFailed {
+						source_channel_id: short_channel_id, sink_node_id: self.get_our_node_id() });
 				}
 			},
 		}
