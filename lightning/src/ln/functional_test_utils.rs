@@ -1130,7 +1130,7 @@ macro_rules! commitment_signed_dance {
 		{
 			commitment_signed_dance!($node_a, $node_b, $commitment_signed, $fail_backwards, true);
 			if $fail_backwards {
-				$crate::expect_pending_htlcs_forwardable!($node_a);
+				expect_pending_htlcs_forwardable!($node_a, PaymentForwardedFailedConditions::new().payment_forwarding_failed());
 				check_added_monitors!($node_a, 1);
 
 				let channel_state = $node_a.node.channel_state.lock().unwrap();
@@ -1191,16 +1191,65 @@ macro_rules! get_route_and_payment_hash {
 	}}
 }
 
+pub struct PaymentForwardedFailedConditions {
+	pub expected_pending_htlcs_forwardable: bool,
+	pub expected_payment_forwarding_failed: Option<u32>,
+}
+
+impl PaymentForwardedFailedConditions {
+	pub fn new() -> Self {
+		Self {
+			expected_pending_htlcs_forwardable: false,
+			expected_payment_forwarding_failed: None,
+		}
+	}
+
+	pub fn pending_htlcs_forwardable(mut self) -> Self {
+		self.expected_pending_htlcs_forwardable = true;
+		self
+	}
+
+	pub fn payment_forwarding_failed(mut self) -> Self {
+		self.expected_payment_forwarding_failed = Some(1);
+		self
+	}
+
+	pub fn payment_forwarding_failed_with_count(mut self, count: u32) -> Self {
+		self.expected_payment_forwarding_failed = Some(count);
+		self
+	}
+}
+
 #[macro_export]
-/// Clears (and ignores) a PendingHTLCsForwardable event
-macro_rules! expect_pending_htlcs_forwardable_ignore {
-	($node: expr) => {{
+macro_rules! expect_pending_htlcs_forwardable_conditions {
+	($node: expr, $conditions: expr) => {{
 		let events = $node.node.get_and_clear_pending_events();
-		assert_eq!(events.len(), 1);
 		match events[0] {
 			$crate::util::events::Event::PendingHTLCsForwardable { .. } => { },
 			_ => panic!("Unexpected event"),
 		};
+
+		if let Some(count) = $conditions.expected_payment_forwarding_failed {
+			assert_eq!(events.len() as u32, count + 1u32);
+			match events[1] {
+				$crate::util::events::Event::PaymentForwardedFailed { .. } => { },
+				_ => panic!("Unexpected event"),
+			}
+		} else {
+			assert_eq!(events.len(), 1);
+		}
+	}}
+}
+
+#[macro_export]
+/// Clears (and ignores) a PendingHTLCsForwardable event
+macro_rules! expect_pending_htlcs_forwardable_ignore {
+	($node: expr) => {{
+		expect_pending_htlcs_forwardable_conditions!($node, $crate::ln::functional_test_utils::PaymentForwardedFailedConditions::new());
+	}};
+
+	($node: expr, $conditions: expr) => {{
+		expect_pending_htlcs_forwardable_conditions!($node, $conditions);
 	}}
 }
 
@@ -1208,7 +1257,15 @@ macro_rules! expect_pending_htlcs_forwardable_ignore {
 /// Handles a PendingHTLCsForwardable event
 macro_rules! expect_pending_htlcs_forwardable {
 	($node: expr) => {{
-		$crate::expect_pending_htlcs_forwardable_ignore!($node);
+		expect_pending_htlcs_forwardable_ignore!($node);
+		$node.node.process_pending_htlc_forwards();
+
+		// Ensure process_pending_htlc_forwards is idempotent.
+		$node.node.process_pending_htlc_forwards();
+	}};
+
+	($node: expr, $conditions: expr) => {{
+		expect_pending_htlcs_forwardable_ignore!($node, $conditions);
 		$node.node.process_pending_htlc_forwards();
 
 		// Ensure process_pending_htlc_forwards is idempotent.
@@ -1219,6 +1276,8 @@ macro_rules! expect_pending_htlcs_forwardable {
 #[cfg(test)]
 macro_rules! expect_pending_htlcs_forwardable_from_events {
 	($node: expr, $events: expr, $ignore: expr) => {{
+		// We need to clear pending events since there may possibly be `PaymentForwardingFailed` events here
+		$node.node.get_and_clear_pending_events();
 		assert_eq!($events.len(), 1);
 		match $events[0] {
 			Event::PendingHTLCsForwardable { .. } => { },
@@ -1692,7 +1751,8 @@ pub fn fail_payment_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expe
 		assert_eq!(path.last().unwrap().node.get_our_node_id(), expected_paths[0].last().unwrap().node.get_our_node_id());
 	}
 	assert!(expected_paths[0].last().unwrap().node.fail_htlc_backwards(&our_payment_hash));
-	expect_pending_htlcs_forwardable!(expected_paths[0].last().unwrap());
+
+	expect_pending_htlcs_forwardable!(expected_paths[0].last().unwrap(), PaymentForwardedFailedConditions::new().payment_forwarding_failed_with_count(expected_paths.len() as u32));
 	check_added_monitors!(expected_paths[0].last().unwrap(), expected_paths.len());
 
 	let mut per_path_msgs: Vec<((msgs::UpdateFailHTLC, msgs::CommitmentSigned), PublicKey)> = Vec::with_capacity(expected_paths.len());
@@ -1727,7 +1787,7 @@ pub fn fail_payment_along_route<'a, 'b, 'c>(origin_node: &Node<'a, 'b, 'c>, expe
 				node.node.handle_update_fail_htlc(&prev_node.node.get_our_node_id(), &next_msgs.as_ref().unwrap().0);
 				commitment_signed_dance!(node, prev_node, next_msgs.as_ref().unwrap().1, update_next_node);
 				if !update_next_node {
-					expect_pending_htlcs_forwardable!(node);
+					expect_pending_htlcs_forwardable!(node, PaymentForwardedFailedConditions::new().payment_forwarding_failed());
 				}
 			}
 			let events = node.node.get_and_clear_pending_msg_events();

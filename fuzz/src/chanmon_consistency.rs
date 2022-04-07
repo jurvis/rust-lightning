@@ -853,6 +853,7 @@ pub fn do_test<Out: Output>(data: &[u8], underlying_out: Out) {
 						events::Event::PendingHTLCsForwardable { .. } => {
 							nodes[$node].process_pending_htlc_forwards();
 						},
+						events::Event::PaymentForwardedFailed { .. } => {},
 						_ => if out.may_fail.load(atomic::Ordering::Acquire) {
 							return;
 						} else {

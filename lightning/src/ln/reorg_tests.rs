@@ -146,7 +146,7 @@ fn do_test_onchain_htlc_reorg(local_commitment: bool, claim: bool) {
 			txdata: vec![],
 		};
 		connect_block(&nodes[1], &block);
-		expect_pending_htlcs_forwardable!(nodes[1]);
+		expect_pending_htlcs_forwardable!(nodes[1], PaymentForwardedFailedConditions::new().payment_forwarding_failed());
 	}
 
 	check_added_monitors!(nodes[1], 1);
