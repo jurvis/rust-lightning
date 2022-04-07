@@ -3982,7 +3982,7 @@ impl<Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelMana
 				pending_events.push(path_failure);
 				if let Some(ev) = full_failure_ev { pending_events.push(ev); }
 			},
-			HTLCSource::PreviousHopData(HTLCPreviousHopData { short_channel_id, htlc_id, incoming_packet_shared_secret, phantom_shared_secret, .. }) => {
+			HTLCSource::PreviousHopData(HTLCPreviousHopData { short_channel_id, htlc_id, incoming_packet_shared_secret, phantom_shared_secret, outpoint }) => {
 				let err_packet = match onion_error {
 					HTLCFailReason::Reason { failure_code, data } => {
 						log_trace!(self.logger, "Failing HTLC with payment_hash {} backwards from us with code {}", log_bytes!(payment_hash.0), failure_code);
@@ -4019,11 +4019,12 @@ impl<Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelMana
 					pending_events.push(events::Event::PendingHTLCsForwardable {
 						time_forwardable: time
 					});
-				} else {
-					let mut pending_events = self.pending_events.lock().unwrap();
-					pending_events.push(events::Event::PaymentForwardedFailed {
-						source_channel_id: short_channel_id, sink_node_id: self.get_our_node_id() });
 				}
+				
+				let mut pending_events = self.pending_events.lock().unwrap();
+				pending_events.push(events::Event::PaymentForwardedFailed {
+					source_channel_id: outpoint.to_channel_id() , sink_node_id: self.get_our_node_id()
+				});
 			},
 		}
 	}

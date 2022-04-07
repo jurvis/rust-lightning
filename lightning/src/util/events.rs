@@ -448,7 +448,7 @@ pub enum Event {
 	/// Indicates that a payment has failed to be forwarded through us
 	PaymentForwardedFailed {
 		/// The channel_id of the sender
-		source_channel_id: u64,
+		source_channel_id: [u8; 32],
 		/// The node_id of the receiver where forwarding has failed
 		sink_node_id: PublicKey
 	},
