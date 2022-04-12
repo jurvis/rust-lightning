@@ -623,21 +623,16 @@ mod tests {
 				let mut expected_bytes = Vec::new();
 				loop {
 					expected_bytes.clear();
-					match $node.lock() {
-						Ok(node) => {
-							match node.write(&mut expected_bytes) {
-								Ok(_) => {
-									match std::fs::read($filepath) {
-										Ok(bytes) => {
-											if bytes == expected_bytes {
-												break
-											} else {
-												continue
-											}
-										},
-										Err(_) => continue
+					match $node.lock().unwrap().write(&mut expected_bytes) {
+						Ok(_) => {
+							match std::fs::read($filepath) {
+								Ok(bytes) => {
+									if bytes == expected_bytes {
+										break
+									} else {
+										continue
 									}
-								}
+								},
 								Err(_) => continue
 							}
 						},
