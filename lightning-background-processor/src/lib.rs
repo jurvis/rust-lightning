@@ -175,7 +175,7 @@ impl BackgroundProcessor {
 		S: 'static + Deref + Send + Sync,
 	>(
 		persister: PS, event_handler: EH, chain_monitor: M, channel_manager: CM,
-		net_graph_msg_handler: Option<NG>, peer_manager: PM, logger: L, scorer: S
+		net_graph_msg_handler: Option<NG>, peer_manager: PM, logger: L, scorer: Option<S>
 	) -> Self
 	where
 		CA::Target: 'static + chain::Access,
@@ -277,11 +277,13 @@ impl BackgroundProcessor {
 						if let Err(e) = persister.persist_graph(handler.network_graph()) {
 							log_error!(logger, "Error: Failed to persist network graph, check your disk and permissions {}", e)
 						}
+						last_prune_call = Instant::now();
+						have_pruned = true;
+					}
+					if let Some(ref scorer) = scorer {
 						if let Err(e) = persister.persist_scorer(&scorer) {
 							log_error!(logger, "Error: Failed to persist scorer, check your disk and permissions {}", e)
 						}
-						last_prune_call = Instant::now();
-						have_pruned = true;
 					}
 				}
 			}
@@ -297,7 +299,9 @@ impl BackgroundProcessor {
 			}
 
 			// Persist Scorer on exit
-			persister.persist_scorer(&scorer)?;
+			if let Some(ref scorer) = scorer {
+				persister.persist_scorer(&scorer)?;
+			}
 
 			Ok(())
 		});
@@ -588,7 +592,7 @@ mod tests {
 		let persister = Arc::new(Persister::new(data_dir));
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer.clone());
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer.clone()));
 
 		macro_rules! check_persisted_data {
 			($node: expr, $filepath: expr) => {
@@ -683,7 +687,7 @@ mod tests {
 		let persister = Arc::new(Persister::new(data_dir));
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 		loop {
 			let log_entries = nodes[0].logger.lines.lock().unwrap();
 			let desired_log = "Calling ChannelManager's timer_tick_occurred".to_string();
@@ -707,7 +711,7 @@ mod tests {
 		let persister = Arc::new(Persister::new(data_dir).with_manager_error(std::io::ErrorKind::Other, "test"));
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 		match bg_processor.join() {
 			Ok(_) => panic!("Expected error persisting manager"),
 			Err(e) => {
@@ -725,7 +729,7 @@ mod tests {
 		let persister = Arc::new(Persister::new(data_dir).with_graph_error(std::io::ErrorKind::Other, "test"));
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 
 		match bg_processor.stop() {
 			Ok(_) => panic!("Expected error persisting network graph"),
@@ -744,7 +748,7 @@ mod tests {
 		let persister = Persister::new(data_dir).with_scorer_error(std::io::ErrorKind::Other, "test");
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 
 		match bg_processor.stop() {
 			Ok(_) => panic!("Expected error persisting scorer"),
@@ -768,7 +772,7 @@ mod tests {
 			sender.send(handle_funding_generation_ready!(event, channel_value)).unwrap();
 		};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 
 		// Open a channel and check that the FundingGenerationReady event was handled.
 		begin_open_channel!(nodes[0], nodes[1], channel_value);
@@ -826,7 +830,7 @@ mod tests {
 		let invoice_payer = Arc::new(InvoicePayer::new(Arc::clone(&nodes[0].node), router, scorer, Arc::clone(&nodes[0].logger), |_: &_| {}, RetryAttempts(2)));
 		let event_handler = Arc::clone(&invoice_payer);
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 		assert!(bg_processor.stop().is_ok());
 	}
 }
