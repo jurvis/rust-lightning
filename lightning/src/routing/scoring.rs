@@ -141,18 +141,7 @@ pub trait LockableScore<'a> {
 ///
 /// We need this trait to be able to pass in a scorer to `lightning-background-processor` that will enable us to
 /// use the Persister to persist it.
-pub trait WriteableScore<'a>: LockableScore<'a> {
-	/// Locks the LockableScore and writes it to disk
-	fn write<W: Writer>(&'a self, writer: &mut W) -> Result<(), io::Error>;
-}
-
-impl<'a, U: Writeable, T: LockableScore<'a>> WriteableScore<'a> for T
-	where T::Locked: DerefMut<Target=U>
-{
-    fn write<W: Writer>(&'a self, writer: &mut W) -> Result<(), io::Error> {
-        self.lock().write(writer)
-    }
-}
+pub trait WriteableScore<'a>: LockableScore<'a> + Writeable {}
 
 /// (C-not exported)
 impl<'a, T: 'a + Score> LockableScore<'a> for Mutex<T> {

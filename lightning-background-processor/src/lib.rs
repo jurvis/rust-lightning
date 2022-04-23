@@ -28,6 +28,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::ops::Deref;
+use lightning::util::ser::Writeable;
 
 /// `BackgroundProcessor` takes care of tasks that (1) need to happen periodically to keep
 /// Rust-Lightning running properly, and (2) either can or should be run in the background. Its
@@ -189,7 +190,7 @@ impl BackgroundProcessor {
 		CMH::Target: 'static + ChannelMessageHandler,
 		RMH::Target: 'static + RoutingMessageHandler,
 		UMH::Target: 'static + CustomMessageHandler,
-		PS::Target: 'static + Persister<Signer, CW, T, K, F, L>,
+		PS::Target: 'static + Persister<Signer, CW, T, K, F, L, S>,
 		S::Target: for<'a> WriteableScore<'a>,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
