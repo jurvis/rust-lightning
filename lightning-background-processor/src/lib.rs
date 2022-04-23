@@ -293,14 +293,14 @@ impl BackgroundProcessor {
 			// ChannelMonitor update(s) persisted without a corresponding ChannelManager update.
 			persister.persist_manager(&*channel_manager)?;
 
-			// Persist NetworkGraph on exit
-			if let Some(ref handler) = net_graph_msg_handler {
-				persister.persist_graph(handler.network_graph())?;
-			}
-
 			// Persist Scorer on exit
 			if let Some(ref scorer) = scorer {
 				persister.persist_scorer(&scorer)?;
+			}
+
+			// Persist NetworkGraph on exit
+			if let Some(ref handler) = net_graph_msg_handler {
+				persister.persist_graph(handler.network_graph())?;
 			}
 
 			Ok(())
