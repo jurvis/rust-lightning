@@ -462,6 +462,12 @@ mod tests {
 				}
 			}
 
+			if key == "scorer" {
+				if let Some((error, message)) = self.scorer_error {
+					return Err(std::io::Error::new(error, message))
+				}
+			}
+
 			self.filesystem_persister.persist(key, object)
 		}
 	}
