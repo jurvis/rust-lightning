@@ -32,7 +32,7 @@ pub trait Persister<'a, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L:
 		K::Target: 'static + KeysInterface<Signer = Signer>,
 		F::Target: 'static + FeeEstimator,
 		L::Target: 'static + Logger,
-		S::Target: 'static + WriteableScore<'a> + Writeable
+		S::Target: 'static + WriteableScore<'a>
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
 	fn persist_manager(&self, channel_manager: &ChannelManager<Signer, M, T, K, F, L>) -> Result<(), io::Error>;
@@ -50,7 +50,7 @@ impl<'a, A: KVStorePersister, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Der
 		K::Target: 'static + KeysInterface<Signer = Signer>,
 		F::Target: 'static + FeeEstimator,
 		L::Target: 'static + Logger,
-		S::Target: 'static + WriteableScore<'a> + Writeable
+		S::Target: 'static + WriteableScore<'a>
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
 	fn persist_manager(&self, channel_manager: &ChannelManager<Signer, M, T, K, F, L>) -> Result<(), io::Error> {

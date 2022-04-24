@@ -143,6 +143,10 @@ pub trait LockableScore<'a> {
 /// use the Persister to persist it.
 pub trait WriteableScore<'a>: LockableScore<'a> + Writeable {}
 
+impl<'a, T> WriteableScore<'a> for T
+	where T: LockableScore<'a> + Writeable
+{}
+
 /// (C-not exported)
 impl<'a, T: 'a + Score> LockableScore<'a> for Mutex<T> {
 	type Locked = MutexGuard<'a, T>;
