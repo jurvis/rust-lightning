@@ -64,7 +64,7 @@ impl<'a, A: KVStorePersister, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Der
 
 	/// Persist the given [`WriteableScore`] to disk, returning an error if persistence failed.
 	fn persist_scorer(&self, scorer: &'a S) -> Result<(), io::Error> {
-		self.persist("scorer", scorer)
+		self.persist("scorer", scorer.deref())
 	}
 }
 
