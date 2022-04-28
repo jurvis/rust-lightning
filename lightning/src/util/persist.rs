@@ -41,7 +41,7 @@ pub trait Persister<'a, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L:
 	fn persist_graph(&self, network_graph: &NetworkGraph) -> Result<(), io::Error>;
 
 	/// Persist the given [`WriteableScore`] to disk, returning an error if persistence failed.
-	fn persist_scorer(&self, scorer: &'a S) -> Result<(), io::Error>;
+	fn persist_scorer(&self, scorer: &S) -> Result<(), io::Error>;
 }
 
 impl<'a, A: KVStorePersister, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref, S: Deref> Persister<'a, Signer, M, T, K, F, L, S> for A
@@ -50,7 +50,7 @@ impl<'a, A: KVStorePersister, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Der
 		K::Target: 'static + KeysInterface<Signer = Signer>,
 		F::Target: 'static + FeeEstimator,
 		L::Target: 'static + Logger,
-		S::Target: 'static + WriteableScore<'a>
+		S::Target: 'static + WriteableScore<'a> + Sized
 {
 	/// Persist the given ['ChannelManager'] to disk, returning an error if persistence failed.
 	fn persist_manager(&self, channel_manager: &ChannelManager<Signer, M, T, K, F, L>) -> Result<(), io::Error> {
@@ -63,7 +63,7 @@ impl<'a, A: KVStorePersister, Signer: Sign, M: Deref, T: Deref, K: Deref, F: Der
 	}
 
 	/// Persist the given [`WriteableScore`] to disk, returning an error if persistence failed.
-	fn persist_scorer(&self, scorer: &'a S) -> Result<(), io::Error> {
+	fn persist_scorer(&self, scorer: &S) -> Result<(), io::Error> {
 		self.persist("scorer", scorer.deref())
 	}
 }

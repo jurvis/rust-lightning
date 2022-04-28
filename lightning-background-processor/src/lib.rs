@@ -153,6 +153,7 @@ impl BackgroundProcessor {
 	/// [`NetworkGraph`]: lightning::routing::network_graph::NetworkGraph
 	/// [`NetworkGraph::write`]: lightning::routing::network_graph::NetworkGraph#impl-Writeable
 	pub fn start<
+		'a,
 		Signer: 'static + Sign,
 		CA: 'static + Deref + Send + Sync,
 		CF: 'static + Deref + Send + Sync,
@@ -190,8 +191,8 @@ impl BackgroundProcessor {
 		CMH::Target: 'static + ChannelMessageHandler,
 		RMH::Target: 'static + RoutingMessageHandler,
 		UMH::Target: 'static + CustomMessageHandler,
-		PS::Target: 'static + Persister<Signer, CW, T, K, F, L, S>,
-		S::Target: for<'a> WriteableScore<'a>,
+		PS::Target: 'static + Persister<'a, Signer, CW, T, K, F, L, S>,
+		S::Target: WriteableScore<'a>,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
 		let stop_thread_clone = stop_thread.clone();
@@ -433,7 +434,7 @@ mod tests {
 	impl Persister {
 		fn new(data_dir: String) -> Self {
 			let filesystem_persister = FilesystemPersister::new(data_dir.clone());
-			Self { data_dir, graph_error: None, manager_error: None, scorer_error: None, filesystem_persister }
+			Self { graph_error: None, manager_error: None, scorer_error: None, filesystem_persister }
 		}
 
 		fn with_graph_error(self, error: std::io::ErrorKind, message: &'static str) -> Self {
