@@ -747,7 +747,7 @@ mod tests {
 		// Test that if we encounter an error during scorer persistence, an error gets returned.
 		let nodes = create_nodes(2, "test_persist_scorer_error".to_string());
 		let data_dir = nodes[0].persister.get_data_dir();
-		let persister = Persister::new(data_dir).with_scorer_error(std::io::ErrorKind::Other, "test");
+		let persister = Arc::new(Persister::new(data_dir).with_scorer_error(std::io::ErrorKind::Other, "test"));
 		let event_handler = |_: &_| {};
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
 		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
@@ -800,7 +800,7 @@ mod tests {
 		let event_handler = move |event: &Event| sender.send(event.clone()).unwrap();
 		let persister = Arc::new(Persister::new(data_dir));
 		let scorer = Arc::new(Mutex::new(test_utils::TestScorer::with_penalty(0)));
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), scorer);
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].net_graph_msg_handler.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone(), Some(scorer));
 
 		// Force close the channel and check that the SpendableOutputs event was handled.
 		nodes[0].node.force_close_channel(&nodes[0].node.list_channels()[0].channel_id).unwrap();
