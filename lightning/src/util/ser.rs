@@ -31,7 +31,7 @@ use bitcoin::secp256k1::schnorr;
 use bitcoin::blockdata::constants::ChainHash;
 use bitcoin::blockdata::script::Script;
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
-use bitcoin::consensus;
+use bitcoin::{consensus, Witness};
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hash_types::{Txid, BlockHash};
@@ -802,6 +802,39 @@ impl Readable for Vec<u8> {
 impl_for_vec!(ecdsa::Signature);
 impl_for_vec!(crate::ln::channelmanager::MonitorUpdateCompletionAction);
 impl_for_vec!((A, B), A, B);
+
+impl Writeable for Vec<Witness> {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
+		(self.len() as u16).write(w)?;
+		for witness in self {
+			(witness.len() as u16).write(w)?;
+			for element in witness.iter() {
+				(element.len() as u16).write(w)?;
+				w.write_all(element)?;
+			}
+		}
+		Ok(())
+	}
+}
+
+impl Readable for Vec<Witness> {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let num_witnesses = <u16 as Readable>::read(r)? as usize;
+		let mut witnesses = Vec::with_capacity(num_witnesses);
+		for _ in 0..num_witnesses {
+			let num_elements = <u16 as Readable>::read(r)? as usize;
+			let mut witness = Witness::new();
+			for _ in 0..num_elements {
+				let len = <u16 as Readable>::read(r)? as usize;
+				let mut buf = vec![0; len];
+				r.read_exact(&mut buf)?;
+				witness.push(buf);
+			}
+			witnesses.push(witness);
+		}
+		Ok(witnesses)
+	}
+}
 
 impl Writeable for Script {
 	fn write<W: Writer>(&self, w: &mut W) -> Result<(), io::Error> {
