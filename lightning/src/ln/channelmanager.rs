@@ -6173,6 +6173,7 @@ where
 		let _ = handle_error!(self, self.internal_open_channel(counterparty_node_id, msg), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_open_channel_v2(&self, counterparty_node_id: &PublicKey, msg: &msgs::OpenChannelV2) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
@@ -6184,6 +6185,7 @@ where
 		let _ = handle_error!(self, self.internal_accept_channel(counterparty_node_id, msg), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_accept_channel_v2(&self, counterparty_node_id: &PublicKey, msg: &msgs::AcceptChannelV2) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
@@ -6298,20 +6300,31 @@ where
 						&events::MessageSendEvent::SendFundingCreated { .. } => false,
 						&events::MessageSendEvent::SendFundingSigned { .. } => false,
 						// V2 Channel Establishment
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendAcceptChannelV2 { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendOpenChannelV2 { .. } => false,
 						// Common Channel Establishment
 						&events::MessageSendEvent::SendChannelReady { .. } => false,
 						&events::MessageSendEvent::SendAnnouncementSignatures { .. } => false,
 						// Interactive Transaction Construction
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxAddInput { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxAddOutput { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxRemoveInput { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxRemoveOutput { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxComplete { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxSignatures { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxInitRbf { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxAckRbf { .. } => false,
+						#[cfg(dual_fund)]
 						&events::MessageSendEvent::SendTxAbort { .. } => false,
 						// Channel Operations
 						&events::MessageSendEvent::UpdateHTLCs { .. } => false,
@@ -6483,54 +6496,63 @@ where
 		provided_init_features(&self.default_configuration)
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_add_input(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxAddInput) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_add_output(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxAddOutput) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_remove_input(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxRemoveInput) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_remove_output(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxRemoveOutput) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_complete(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxComplete) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_signatures(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxSignatures) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_init_rbf(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxInitRbf) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_ack_rbf(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxAckRbf) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),
 			 msg.temporary_channel_id.clone())), *counterparty_node_id);
 	}
 
+	#[cfg(dual_fund)]
 	fn handle_tx_abort(&self, counterparty_node_id: &PublicKey, msg: &msgs::TxAbort) {
 		let _: Result<(), _> = handle_error!(self, Err(MsgHandleErrInternal::send_err_msg_no_close(
 			"Dual-funded channels not supported".to_owned(),

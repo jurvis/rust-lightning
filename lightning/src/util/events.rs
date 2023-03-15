@@ -1505,6 +1505,7 @@ pub enum MessageSendEvent {
 	},
 	/// Used to indicate that we've accepted a V2 channel open and should send the accept_channel2
 	/// message provided to the given peer.
+	#[cfg(dual_fund)]
 	SendAcceptChannelV2 {
 		/// The node_id of the node which should receive this message
 		node_id: PublicKey,
@@ -1521,6 +1522,7 @@ pub enum MessageSendEvent {
 	},
 	/// Used to indicate that we've initiated a V2 channel open and should send the open_channel2
 	/// message provided to the given peer.
+	#[cfg(dual_fund)]
 	SendOpenChannelV2 {
 		/// The node_id of the node which should receive this message
 		node_id: PublicKey,
@@ -1541,6 +1543,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::FundingSigned,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_add_input message should be sent to the peer with the given node_id.
 	SendTxAddInput {
 		/// The node_id of the node which should receive this message
@@ -1548,6 +1551,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxAddInput,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_add_output message should be sent to the peer with the given node_id.
 	SendTxAddOutput {
 		/// The node_id of the node which should receive this message
@@ -1555,6 +1559,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxAddOutput,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_remove_input message should be sent to the peer with the given node_id.
 	SendTxRemoveInput {
 		/// The node_id of the node which should receive this message
@@ -1562,6 +1567,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxRemoveInput,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_remove_output message should be sent to the peer with the given node_id.
 	SendTxRemoveOutput {
 		/// The node_id of the node which should receive this message
@@ -1569,6 +1575,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxRemoveOutput,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_complete message should be sent to the peer with the given node_id.
 	SendTxComplete {
 		/// The node_id of the node which should receive this message
@@ -1576,6 +1583,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxComplete,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_signatures message should be sent to the peer with the given node_id.
 	SendTxSignatures {
 		/// The node_id of the node which should receive this message
@@ -1583,6 +1591,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxSignatures,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_init_rbf message should be sent to the peer with the given node_id.
 	SendTxInitRbf {
 		/// The node_id of the node which should receive this message
@@ -1590,6 +1599,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxInitRbf,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_ack_rbf message should be sent to the peer with the given node_id.
 	SendTxAckRbf {
 		/// The node_id of the node which should receive this message
@@ -1597,6 +1607,7 @@ pub enum MessageSendEvent {
 		/// The message which should be sent.
 		msg: msgs::TxAckRbf,
 	},
+	#[cfg(dual_fund)]
 	/// Used to indicate that a tx_abort message should be sent to the peer with the given node_id.
 	SendTxAbort {
 		/// The node_id of the node which should receive this message

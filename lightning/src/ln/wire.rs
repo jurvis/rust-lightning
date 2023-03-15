@@ -54,19 +54,30 @@ pub(crate) enum Message<T> where T: core::fmt::Debug + Type + TestEq {
 	Ping(msgs::Ping),
 	Pong(msgs::Pong),
 	OpenChannel(msgs::OpenChannel),
+	#[cfg(dual_fund)]
 	OpenChannelV2(msgs::OpenChannelV2),
 	AcceptChannel(msgs::AcceptChannel),
+	#[cfg(dual_fund)]
 	AcceptChannelV2(msgs::AcceptChannelV2),
 	FundingCreated(msgs::FundingCreated),
 	FundingSigned(msgs::FundingSigned),
+	#[cfg(dual_fund)]
 	TxAddInput(msgs::TxAddInput),
+	#[cfg(dual_fund)]
 	TxAddOutput(msgs::TxAddOutput),
+	#[cfg(dual_fund)]
 	TxRemoveInput(msgs::TxRemoveInput),
+	#[cfg(dual_fund)]
 	TxRemoveOutput(msgs::TxRemoveOutput),
+	#[cfg(dual_fund)]
 	TxComplete(msgs::TxComplete),
+	#[cfg(dual_fund)]
 	TxSignatures(msgs::TxSignatures),
+	#[cfg(dual_fund)]
 	TxInitRbf(msgs::TxInitRbf),
+	#[cfg(dual_fund)]
 	TxAckRbf(msgs::TxAckRbf),
+	#[cfg(dual_fund)]
 	TxAbort(msgs::TxAbort),
 	ChannelReady(msgs::ChannelReady),
 	Shutdown(msgs::Shutdown),
@@ -106,19 +117,30 @@ impl<T> Message<T> where T: core::fmt::Debug + Type + TestEq {
 			&Message::Ping(ref msg) => msg.type_id(),
 			&Message::Pong(ref msg) => msg.type_id(),
 			&Message::OpenChannel(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::OpenChannelV2(ref msg) => msg.type_id(),
 			&Message::AcceptChannel(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::AcceptChannelV2(ref msg) => msg.type_id(),
 			&Message::FundingCreated(ref msg) => msg.type_id(),
 			&Message::FundingSigned(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxAddInput(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxAddOutput(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxRemoveInput(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxRemoveOutput(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxComplete(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxSignatures(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxInitRbf(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxAckRbf(ref msg) => msg.type_id(),
+			#[cfg(dual_fund)]
 			&Message::TxAbort(ref msg) => msg.type_id(),
 			&Message::ChannelReady(ref msg) => msg.type_id(),
 			&Message::Shutdown(ref msg) => msg.type_id(),
@@ -191,12 +213,14 @@ fn do_read<R: io::Read, T, H: core::ops::Deref>(buffer: &mut R, message_type: u1
 		msgs::OpenChannel::TYPE => {
 			Ok(Message::OpenChannel(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::OpenChannelV2::TYPE => {
 			Ok(Message::OpenChannelV2(Readable::read(buffer)?))
 		},
 		msgs::AcceptChannel::TYPE => {
 			Ok(Message::AcceptChannel(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::AcceptChannelV2::TYPE => {
 			Ok(Message::AcceptChannelV2(Readable::read(buffer)?))
 		},
@@ -206,30 +230,39 @@ fn do_read<R: io::Read, T, H: core::ops::Deref>(buffer: &mut R, message_type: u1
 		msgs::FundingSigned::TYPE => {
 			Ok(Message::FundingSigned(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxAddInput::TYPE => {
 			Ok(Message::TxAddInput(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxAddOutput::TYPE => {
 			Ok(Message::TxAddOutput(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxRemoveInput::TYPE => {
 			Ok(Message::TxRemoveInput(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxRemoveOutput::TYPE => {
 			Ok(Message::TxRemoveOutput(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxComplete::TYPE => {
 			Ok(Message::TxComplete(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxSignatures::TYPE => {
 			Ok(Message::TxSignatures(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxInitRbf::TYPE => {
 			Ok(Message::TxInitRbf(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxAckRbf::TYPE => {
 			Ok(Message::TxAckRbf(Readable::read(buffer)?))
 		},
+		#[cfg(dual_fund)]
 		msgs::TxAbort::TYPE => {
 			Ok(Message::TxAbort(Readable::read(buffer)?))
 		},
