@@ -270,3 +270,61 @@ impl InteractiveTxConstructor<NegotiationComplete> {
 		todo!();
 	}
 }
+
+enum ChannelMode {
+	Negotiating(InteractiveTxConstructor<Negotiating>),
+	OurTxComplete(InteractiveTxConstructor<OurTxComplete>),
+	TheirTxComplete(InteractiveTxConstructor<TheirTxComplete>),
+	NegotiationComplete(InteractiveTxConstructor<NegotiationComplete>),
+	OurTxSignatures(InteractiveTxConstructor<OurTxSignatures>),
+	TheirTxSignatures(InteractiveTxConstructor<TheirTxSignatures>),
+	NegotiationFailed(InteractiveTxConstructor<NegotiationFailed>),
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::ln::interactivetxs::ChannelMode::Negotiating;
+	use crate::ln::interactivetxs::{ChannelMode, DummyChannel, InteractiveTxConstructor};
+	use bitcoin::consensus::encode;
+	use bitcoin::Transaction;
+	use crate::ln::msgs::TxAddInput;
+
+	struct DummyChannel {
+		mode: ChannelMode,
+	}
+
+	impl DummyChannel {
+		fn new() -> Self {
+			let tx: Transaction = encode::deserialize(&hex::decode("020000000001010e0ade\
+			f48412e4361325ac1c6e36411299ab09d4f083b9d8ddb55fbc06e1b0c00000000000feffffff0220a107000\
+			0000000220020f81d95e040bd0a493e38bae27bff52fe2bb58b93b293eb579c01c31b05c5af1dc072cfee54\
+			a3000016001434b1d6211af5551905dc2642d05f5b04d25a8fe80247304402207f570e3f0de50546aad25a8\
+			72e3df059d277e776dda4269fa0d2cc8c2ee6ec9a022054e7fae5ca94d47534c86705857c24ceea3ad51c69\
+			dd6051c5850304880fc43a012103cb11a1bacc223d98d91f1946c6752e358a5eb1a1c983b3e6fb15378f453\
+			b76bd00000000").unwrap()[..]).unwrap();
+			Self {
+				mode: Negotiating(InteractiveTxConstructor::new(
+					[0; 32],
+					true,
+					true,
+					tx
+				))
+			}
+		}
+	}
+
+	fn trivial_test() {
+		let channel_a = DummyChannel::new();
+
+		match channel_a.mode {
+			Negotiating(constructor) => {}
+			ChannelMode::OurTxComplete(_) => {}
+			ChannelMode::TheirTxComplete(_) => {}
+			ChannelMode::NegotiationComplete(_) => {}
+			ChannelMode::OurTxSignatures(_) => {}
+			ChannelMode::TheirTxSignatures(_) => {}
+			ChannelMode::NegotiationFailed(_) => {}
+		}
+	}
+}
+
