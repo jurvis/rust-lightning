@@ -196,6 +196,7 @@ impl<S> InteractiveTxConstructor<S>
 
 	fn receive_tx_add_output(mut self, serial_id: u64, output: TxOut) ->
 	Result<InteractiveTxConstructor<Negotiating>, InteractiveTxConstructor<NegotiationFailed>> {
+		// TODO: the sats amount is less than the dust_limit
 		self.inner.received_tx_add_output_count += 1;
 		if self.inner.received_tx_add_output_count > MAX_RECEIVED_TX_ADD_OUTPUT_COUNT {
 			// The receiving node:
@@ -221,6 +222,9 @@ impl<S> InteractiveTxConstructor<S>
 		}
 	}
 
+	pub(crate) fn receive_tx_abort(mut self) -> InteractiveTxConstructor<NegotiationFailed> {
+		todo!();
+	}
 
 	fn send_tx_add_input(mut self, serial_id: u64, input: TxIn) -> InteractiveTxConstructor<Negotiating> {
 		self.inner.inputs.insert(serial_id, input);
@@ -233,10 +237,9 @@ impl<S> InteractiveTxConstructor<S>
 	}
 
 	pub(crate) fn send_tx_abort(mut self) -> InteractiveTxConstructor<NegotiationFailed> {
-		todo!();
-	}
-
-	pub(crate) fn receive_tx_abort(mut self) -> InteractiveTxConstructor<NegotiationFailed> {
+		// A sending node:
+		// 	- MUST NOT have already transmitted tx_signatures
+		// 	- SHOULD forget the current negotiation and reset their state.
 		todo!();
 	}
 
@@ -267,6 +270,20 @@ impl InteractiveTxConstructor<OurTxComplete> {
 impl InteractiveTxConstructor<NegotiationComplete> {
 	fn get_psbt(&self) -> Result<Psbt, InteractiveTxConstructionError> {
 		// Build PSBT from inputs & outputs
+		Psbt {
+			unsigned_tx: Transaction {
+				version: self.inner.base_tx.version,
+				lock_time: self.inner.base_tx.lock_time,
+				input: self.inner.inputs.into_values().collect(),
+				output: self.inner.outputs.into_values().collect(),
+			},
+			version: 0,
+			xpub: Default::default(),
+			proprietary: Default::default(),
+			unknown: Default::default(),
+			inputs: vec![],
+			outputs: vec![],
+		};
 		todo!();
 	}
 }
