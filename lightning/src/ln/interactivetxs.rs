@@ -333,16 +333,24 @@ mod tests {
 		}
 
 		fn handle_add_tx_input(&mut self) {
-			match &self.mode {
-				Negotiating(constructor) => {
-					self.mode = match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
-						Ok(c) => { Negotiating(c) }
-						Err(c) => { NegotiationFailed(c) }
-					}
+			self.mode = if let Negotiating(constructor) = self.mode {
+				match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
+					Ok(c) => { Negotiating(c) }
+					Err(c) => { NegotiationFailed(c) }
 				}
-				_ => {}
+			} else {
+				self.mode
 			}
 		}
+		// match &self.mode {
+		// 	Negotiating(constructor) => {
+		// 		self.mode = match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
+		// 			Ok(c) => { Negotiating(c) }
+		// 			Err(c) => { NegotiationFailed(c) }
+		// 		}
+		// 	}
+		// 	_ => {}
+		// }
 	}
 
 	// Fixtures
