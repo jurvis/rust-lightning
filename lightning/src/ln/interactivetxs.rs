@@ -339,14 +339,17 @@ mod tests {
 			}
 		}
 
-		// Optiona A: using `mem::take`
 		fn handle_add_tx_input(&mut self) {
 			// We use mem::take here because we want to update `self.mode` based on its value and
 			// avoid cloning `ChannelMode`.
 			// By moving the value out of the struct, we can now safely modify it in this scope.
 			let mut mode = core::mem::take(&mut self.mode);
-			self.mode = if let Negotiating(constructor) = &mut mode {
-				match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
+			self.mode = if let Negotiating(constructor) = mode {
+				match constructor.receive_tx_add_input(
+					1234,
+					get_sample_tx_add_input(),
+					true
+				) {
 					Ok(c) => Negotiating(c),
 					Err(c) => NegotiationFailed(c),
 				}
@@ -354,18 +357,6 @@ mod tests {
 				mode
 			}
 		}
-
-		// Option B: taking in a `mut`
-		// fn handle_add_tx_input(mut self) {
-		// 	self.mode = if let Negotiating(constructor) = self.mode {
-		// 		match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
-		// 			Ok(c) => { Negotiating(c) }
-		// 			Err(c) => { NegotiationFailed(c) }
-		// 		}
-		// 	} else {
-		// 		self.mode
-		// 	}
-		// }
 	}
 
 	// Fixtures
