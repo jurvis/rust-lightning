@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bitcoin::{TxIn, Sequence, Transaction, TxOut, OutPoint};
+use crate::ln::interactivetxs::ChannelMode::Indeterminate;
 
 use super::msgs::TxAddInput;
 
@@ -295,11 +296,17 @@ enum ChannelMode {
 	OurTxSignatures(InteractiveTxConstructor<OurTxSignatures>),
 	TheirTxSignatures(InteractiveTxConstructor<TheirTxSignatures>),
 	NegotiationFailed(InteractiveTxConstructor<NegotiationFailed>),
+	Indeterminate,
+}
+
+impl Default for ChannelMode {
+	fn default() -> Self { Indeterminate }
 }
 
 #[cfg(test)]
 mod tests {
 	use core::str::FromStr;
+	use std::collections::HashMap;
 	use crate::ln::interactivetxs::ChannelMode::{Negotiating, NegotiationFailed};
 	use crate::ln::interactivetxs::{ChannelMode, InteractiveTxConstructor};
 	use bitcoin::consensus::encode;
@@ -312,8 +319,6 @@ mod tests {
 		mode: ChannelMode,
 	}
 
-	// ChannelManager receives messages from the wire, do some checks, and delegates it to
-	// the channel to process.
 	impl DummyChannel {
 		fn new() -> Self {
 			let tx: Transaction = encode::deserialize(&hex::decode("020000000001010e0ade\
@@ -334,24 +339,32 @@ mod tests {
 			}
 		}
 
+		// Optiona A: using `mem::take`
 		fn handle_add_tx_input(&mut self) {
-			self.mode = if let Negotiating(constructor) = self.mode {
+			// We use mem::take here because we want to update `self.mode` based on its value and
+			// avoid cloning `ChannelMode`.
+			// By moving the value out of the struct, we can now safely modify it in this scope.
+			let mut mode = core::mem::take(&mut self.mode);
+			self.mode = if let Negotiating(constructor) = &mut mode {
 				match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
-					Ok(c) => { Negotiating(c) }
-					Err(c) => { NegotiationFailed(c) }
+					Ok(c) => Negotiating(c),
+					Err(c) => NegotiationFailed(c),
 				}
 			} else {
-				self.mode
+				mode
 			}
 		}
-		// match &self.mode {
-		// 	Negotiating(constructor) => {
-		// 		self.mode = match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
+
+		// Option B: taking in a `mut`
+		// fn handle_add_tx_input(mut self) {
+		// 	self.mode = if let Negotiating(constructor) = self.mode {
+		// 		match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
 		// 			Ok(c) => { Negotiating(c) }
 		// 			Err(c) => { NegotiationFailed(c) }
 		// 		}
+		// 	} else {
+		// 		self.mode
 		// 	}
-		// 	_ => {}
 		// }
 	}
 
