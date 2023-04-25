@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::{psbt::Psbt, TxIn, Sequence, Transaction, TxOut, OutPoint};
+use bitcoin::{TxIn, Sequence, Transaction, TxOut, OutPoint};
 
 use super::msgs::TxAddInput;
 
@@ -268,23 +268,14 @@ impl InteractiveTxConstructor<OurTxComplete> {
 }
 
 impl InteractiveTxConstructor<NegotiationComplete> {
-	fn get_psbt(&self) -> Result<Psbt, InteractiveTxConstructionError> {
-		// Build PSBT from inputs & outputs
-		Psbt {
-			unsigned_tx: Transaction {
-				version: self.inner.base_tx.version,
-				lock_time: self.inner.base_tx.lock_time,
-				input: self.inner.inputs.into_values().collect(),
-				output: self.inner.outputs.into_values().collect(),
-			},
-			version: 0,
-			xpub: Default::default(),
-			proprietary: Default::default(),
-			unknown: Default::default(),
-			inputs: vec![],
-			outputs: vec![],
-		};
-		todo!();
+	fn get_psbt(&self) -> Result<Transaction, InteractiveTxConstructionError> {
+		// Build transaction from inputs & outputs in `NegotiationContext`.
+		return Ok(Transaction {
+			version: self.context.base_tx.version,
+			lock_time: self.context.base_tx.lock_time,
+			input: self.context.inputs.values().cloned().collect(),
+			output: self.context.outputs.values().cloned().collect(),
+		})
 	}
 }
 
