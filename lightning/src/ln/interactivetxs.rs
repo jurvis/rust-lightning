@@ -82,24 +82,31 @@ struct NegotiationContext {
 }
 
 pub(crate) struct InteractiveTxConstructor<S> {
-	inner: Box<NegotiationContext>,
+	context: NegotiationContext,
 	state: S,
 }
 
 impl InteractiveTxConstructor<Negotiating> {
-	fn new(channel_id: [u8; 32], require_confirmed_inputs: bool, is_initiator: bool, base_tx: Transaction) -> Self {
+	fn new(
+		channel_id: [u8; 32],
+		require_confirmed_inputs: bool,
+		is_initiator: bool,
+		base_tx: Transaction,
+		did_send_tx_signatures: bool,
+	) -> Self {
 		Self {
-			inner: Box::new(NegotiationContext {
+			context: NegotiationContext {
 				channel_id,
 				require_confirmed_inputs,
+				base_tx,
+				did_send_tx_signatures,
 				holder_is_initiator: is_initiator,
 				received_tx_add_input_count: 0,
 				received_tx_add_output_count: 0,
 				inputs: HashMap::new(),
 				prevtx_outpoints: HashSet::new(),
 				outputs: HashMap::new(),
-				base_tx,
-			}),
+			},
 			state: Negotiating,
 		}
 	}
@@ -109,7 +116,7 @@ impl<S> InteractiveTxConstructor<S>
 	where S: AcceptingChanges {
 	fn fail_negotiation(self, error: InteractiveTxConstructionError) ->
 	Result<InteractiveTxConstructor<Negotiating>, InteractiveTxConstructor<NegotiationFailed>> {
-		Err(InteractiveTxConstructor { inner: self.inner, state: NegotiationFailed { error } })
+		Err(InteractiveTxConstructor { context: self.context, state: NegotiationFailed { error } })
 	}
 
 	fn receive_tx_add_input(mut self, serial_id: SerialId, msg: TxAddInput, confirmed: bool) ->
@@ -130,7 +137,7 @@ impl<S> InteractiveTxConstructor<S>
 			return self.fail_negotiation(InteractiveTxConstructionError::IncorrectInputSequenceValue);
 		}
 
-		if self.inner.require_confirmed_inputs && !confirmed {
+		if self.context.require_confirmed_inputs && !confirmed {
 			return self.fail_negotiation(InteractiveTxConstructionError::InputsNotConfirmed);
 		}
 
@@ -140,7 +147,7 @@ impl<S> InteractiveTxConstructor<S>
 				//  - MUST fail the negotiation if:
 				//     - the `scriptPubKey` is not a witness program
 				return self.fail_negotiation(InteractiveTxConstructionError::PrevTxOutInvalid);
-			} else if !self.inner.prevtx_outpoints.insert(OutPoint { txid: msg.prevtx.txid(), vout: msg.prevtx_out }) {
+			} else if !self.context.prevtx_outpoints.insert(OutPoint { txid: msg.prevtx.txid(), vout: msg.prevtx_out }) {
 				// The receiving node:
 				//  - MUST fail the negotiation if:
 				//     - the `prevtx` and `prevtx_vout` are identical to a previously added
@@ -154,20 +161,20 @@ impl<S> InteractiveTxConstructor<S>
 			return self.fail_negotiation(InteractiveTxConstructionError::PrevTxOutInvalid);
 		}
 
-		self.inner.received_tx_add_input_count += 1;
-		if self.inner.received_tx_add_input_count > MAX_RECEIVED_TX_ADD_INPUT_COUNT {
+		self.context.received_tx_add_input_count += 1;
+		if self.context.received_tx_add_input_count > MAX_RECEIVED_TX_ADD_INPUT_COUNT {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
 			//     - if has received 4096 `tx_add_input` messages during this negotiation
 			return self.fail_negotiation(InteractiveTxConstructionError::ReceivedTooManyTxAddInputs);
 		}
 
-		if let None = self.inner.inputs.insert(serial_id, TxIn {
+		if let None = self.context.inputs.insert(serial_id, TxIn {
 			previous_output: OutPoint { txid: msg.prevtx.txid(), vout: msg.prevtx_out },
 			sequence: Sequence(msg.sequence),
 			..Default::default()
 		}) {
-			Ok(InteractiveTxConstructor { inner: self.inner, state: Negotiating {} })
+			Ok(InteractiveTxConstructor { context: self.context, state: Negotiating {} })
 		} else {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
@@ -182,9 +189,9 @@ impl<S> InteractiveTxConstructor<S>
 			return self.fail_negotiation(InteractiveTxConstructionError::IncorrectSerialIdParity);
 		}
 
-		if let Some(input) = self.inner.inputs.remove(&serial_id) {
-			self.inner.prevtx_outpoints.remove(&input.previous_output);
-			Ok(InteractiveTxConstructor { inner: self.inner, state: Negotiating {} })
+		if let Some(input) = self.context.inputs.remove(&serial_id) {
+			self.context.prevtx_outpoints.remove(&input.previous_output);
+			Ok(InteractiveTxConstructor { context: self.context, state: Negotiating {} })
 		} else {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
@@ -197,8 +204,8 @@ impl<S> InteractiveTxConstructor<S>
 	fn receive_tx_add_output(mut self, serial_id: u64, output: TxOut) ->
 	Result<InteractiveTxConstructor<Negotiating>, InteractiveTxConstructor<NegotiationFailed>> {
 		// TODO: the sats amount is less than the dust_limit
-		self.inner.received_tx_add_output_count += 1;
-		if self.inner.received_tx_add_output_count > MAX_RECEIVED_TX_ADD_OUTPUT_COUNT {
+		self.context.received_tx_add_output_count += 1;
+		if self.context.received_tx_add_output_count > MAX_RECEIVED_TX_ADD_OUTPUT_COUNT {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
 			//     - if has received 4096 `tx_add_output` messages during this negotiation
@@ -212,8 +219,8 @@ impl<S> InteractiveTxConstructor<S>
 			return self.fail_negotiation(InteractiveTxConstructionError::ExceedMaxiumSatsAllowed);
 		}
 
-		if let None = self.inner.outputs.insert(serial_id, output) {
-			Ok(InteractiveTxConstructor { inner: self.inner, state: Negotiating {} })
+		if let None = self.context.outputs.insert(serial_id, output) {
+			Ok(InteractiveTxConstructor { context: self.context, state: Negotiating {} })
 		} else {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
@@ -227,13 +234,13 @@ impl<S> InteractiveTxConstructor<S>
 	}
 
 	fn send_tx_add_input(mut self, serial_id: u64, input: TxIn) -> InteractiveTxConstructor<Negotiating> {
-		self.inner.inputs.insert(serial_id, input);
-		InteractiveTxConstructor { inner: self.inner, state: Negotiating {} }
+		self.context.inputs.insert(serial_id, input);
+		InteractiveTxConstructor { context: self.context, state: Negotiating {} }
 	}
 
 	pub(crate) fn send_tx_add_output(mut self, serial_id: u64, output: TxOut) -> InteractiveTxConstructor<Negotiating> {
-		self.inner.outputs.insert(serial_id, output);
-		InteractiveTxConstructor { inner: self.inner, state: Negotiating {} }
+		self.context.outputs.insert(serial_id, output);
+		InteractiveTxConstructor { context: self.context, state: Negotiating {} }
 	}
 
 	pub(crate) fn send_tx_abort(mut self) -> InteractiveTxConstructor<NegotiationFailed> {
@@ -245,14 +252,14 @@ impl<S> InteractiveTxConstructor<S>
 
 	fn is_valid_counterparty_serial_id(&self, serial_id: SerialId) -> bool {
 		// A received `SerialId`'s parity must match the role of the counterparty.
-		self.inner.holder_is_initiator == !serial_id.is_valid_for_initiator()
+		self.context.holder_is_initiator == !serial_id.is_valid_for_initiator()
 	}
 }
 
 impl InteractiveTxConstructor<TheirTxComplete> {
 	fn send_tx_complete(self) -> InteractiveTxConstructor<NegotiationComplete> {
 		InteractiveTxConstructor {
-			inner: self.inner,
+			context: self.context,
 			state: NegotiationComplete {}
 		}
 	}
@@ -261,7 +268,7 @@ impl InteractiveTxConstructor<TheirTxComplete> {
 impl InteractiveTxConstructor<OurTxComplete> {
 	fn receive_tx_complete(self) -> InteractiveTxConstructor<NegotiationComplete> {
 		InteractiveTxConstructor {
-			inner: self.inner,
+			context: self.context,
 			state: NegotiationComplete {}
 		}
 	}
@@ -291,16 +298,21 @@ enum ChannelMode {
 
 #[cfg(test)]
 mod tests {
-	use crate::ln::interactivetxs::ChannelMode::Negotiating;
-	use crate::ln::interactivetxs::{ChannelMode, DummyChannel, InteractiveTxConstructor};
+	use core::str::FromStr;
+	use crate::ln::interactivetxs::ChannelMode::{Negotiating, NegotiationFailed};
+	use crate::ln::interactivetxs::{ChannelMode, InteractiveTxConstructor};
 	use bitcoin::consensus::encode;
-	use bitcoin::Transaction;
+	use bitcoin::{Address, PackedLockTime, Script, Sequence, Transaction, Txid, TxIn, TxOut, Witness};
+	use bitcoin::hashes::hex::FromHex;
+	use crate::chain::transaction::OutPoint;
 	use crate::ln::msgs::TxAddInput;
 
 	struct DummyChannel {
 		mode: ChannelMode,
 	}
 
+	// ChannelManager receives messages from the wire, do some checks, and delegates it to
+	// the channel to process.
 	impl DummyChannel {
 		fn new() -> Self {
 			let tx: Transaction = encode::deserialize(&hex::decode("020000000001010e0ade\
@@ -319,20 +331,50 @@ mod tests {
 				))
 			}
 		}
+
+		fn handle_add_tx_input(&mut self) {
+			match &self.mode {
+				Negotiating(constructor) => {
+					self.mode = match constructor.receive_tx_add_input(1234, get_sample_tx_add_input(), true) {
+						Ok(c) => { Negotiating(c) }
+						Err(c) => { NegotiationFailed(c) }
+					}
+				}
+				_ => {}
+			}
+		}
 	}
 
-	fn trivial_test() {
-		let channel_a = DummyChannel::new();
-
-		match channel_a.mode {
-			Negotiating(constructor) => {}
-			ChannelMode::OurTxComplete(_) => {}
-			ChannelMode::TheirTxComplete(_) => {}
-			ChannelMode::NegotiationComplete(_) => {}
-			ChannelMode::OurTxSignatures(_) => {}
-			ChannelMode::TheirTxSignatures(_) => {}
-			ChannelMode::NegotiationFailed(_) => {}
-		}
+	// Fixtures
+	fn get_sample_tx_add_input() -> TxAddInput {
+		return TxAddInput {
+			temporary_channel_id: [2; 32],
+			serial_id: 4886718345,
+			prevtx: Transaction {
+				version: 2,
+				lock_time: PackedLockTime(0),
+				input: vec![TxIn {
+					previous_output: OutPoint { txid: Txid::from_hex("305bab643ee297b8b6b76b320792c8223d55082122cb606bf89382146ced9c77").unwrap(), index: 2 }.into_bitcoin_outpoint(),
+					script_sig: Script::new(),
+					sequence: Sequence(0xfffffffd),
+					witness: Witness::from_vec(vec![
+						hex::decode("304402206af85b7dd67450ad12c979302fac49dfacbc6a8620f49c5da2b5721cf9565ca502207002b32fed9ce1bf095f57aeb10c36928ac60b12e723d97d2964a54640ceefa701").unwrap(),
+						hex::decode("0301ab7dc16488303549bfcdd80f6ae5ee4c20bf97ab5410bbd6b1bfa85dcd6944").unwrap()]),
+				}],
+				output: vec![
+					TxOut {
+						value: 12704566,
+						script_pubkey: Address::from_str("bc1qzlffunw52jav8vwdu5x3jfk6sr8u22rmq3xzw2").unwrap().script_pubkey(),
+					},
+					TxOut {
+						value: 245148,
+						script_pubkey: Address::from_str("bc1qxmk834g5marzm227dgqvynd23y2nvt2ztwcw2z").unwrap().script_pubkey(),
+					},
+				],
+			},
+			prevtx_out: 305419896,
+			sequence: 305419896,
+		};
 	}
 }
 
