@@ -79,6 +79,7 @@ struct NegotiationContext {
 	prevtx_outpoints: HashSet<OutPoint>,
 	outputs: HashMap<u64, TxOut>,
 	base_tx: Transaction,
+	did_send_tx_signatures: bool,
 }
 
 pub(crate) struct InteractiveTxConstructor<S> {
@@ -327,7 +328,8 @@ mod tests {
 					[0; 32],
 					true,
 					true,
-					tx
+					tx,
+					false,
 				))
 			}
 		}
