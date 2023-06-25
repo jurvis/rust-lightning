@@ -31,6 +31,7 @@ impl SerialIdExt for SerialId {
     fn is_valid_for_initiator(&self) -> bool { self % 2 == 0 }
 }
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum AbortReason {
     CounterpartyAborted,
     InputsNotConfirmed,
@@ -40,10 +41,13 @@ pub(crate) enum AbortReason {
     IncorrectSerialIdParity,
     SerialIdUnknown,
     DuplicateSerialId,
-    PrevTxOutInvalid,
+    PrevTxOutInvalid {
+        reason: String
+    },
     ExceededMaximumSatsAllowed,
 }
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum ConstructionState {
     /// We are currently in the process of negotiating the transaction.
     Negotiating,
@@ -104,7 +108,7 @@ impl InteractiveTxConstructor {
 /// Operations that only work for [`ConstructionState::Negotiating`] and
 /// [`ConstructionState::OurTxComplete`]
 impl InteractiveTxConstructor {
-    fn receive_tx_add_input(mut self, serial_id: SerialId, msg: TxAddInput, confirmed: bool) {
+    fn receive_tx_add_input(&mut self, serial_id: SerialId, msg: TxAddInput, confirmed: bool) {
         match self.state {
             ConstructionState::Negotiating | ConstructionState::OurTxComplete => {
                 // - TODO: MUST fail the negotiation if:
@@ -134,7 +138,11 @@ impl InteractiveTxConstructor {
                         // The receiving node:
                         //  - MUST fail the negotiation if:
                         //     - the `scriptPubKey` is not a witness program
-                        return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
+                        return self.abort_negotiation(
+                            AbortReason::PrevTxOutInvalid {
+                                reason: "scriptPubKey is not a witness program".to_string()
+                            }
+                        );
                     } else if !self.context.prevtx_outpoints.insert(
                         OutPoint {
                             txid: transaction.txid(),
@@ -145,13 +153,21 @@ impl InteractiveTxConstructor {
                         //  - MUST fail the negotiation if:
                         //     - the `prevtx` and `prevtx_vout` are identical to a previously added
                         //       (and not removed) input's
-                        return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
+                        return self.abort_negotiation(
+                            AbortReason::PrevTxOutInvalid {
+                                reason: "`prevtx` and `prevtx_vout is identical to previously added input".to_string()
+                            }
+                        );
                     }
                 } else {
                     // The receiving node:
                     //  - MUST fail the negotiation if:
                     //     - `prevtx_vout` is greater or equal to the number of outputs on `prevtx`
-                    return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
+                    return self.abort_negotiation(
+                        AbortReason::PrevTxOutInvalid {
+                            reason: "prevtx_vout is greater or equal to number of outputs on `prevtx".to_string()
+                        }
+                    );
                 }
 
                 self.context.received_tx_add_input_count += 1;
@@ -298,3 +314,104 @@ impl InteractiveTxConstructor {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use core::str::FromStr;
+    use bitcoin::consensus::encode;
+    use bitcoin::{Address, PackedLockTime, Script, Sequence, Transaction, Txid, TxIn, TxOut, Witness};
+    use bitcoin::hashes::hex::FromHex;
+    use crate::chain::transaction::OutPoint;
+    use crate::ln::interactivetxs::ConstructionState::{Negotiating, NegotiationFailed};
+    use crate::ln::interactivetxs::{ConstructionState, InteractiveTxConstructor, SerialId};
+    use crate::ln::interactivetxs::AbortReason::IncorrectSerialIdParity;
+    use crate::ln::msgs;
+    use crate::ln::msgs::TxAddInput;
+    use crate::util::ser::TransactionU16LenLimited;
+
+    struct DummyChannel {
+        interactive_tx_constructor: InteractiveTxConstructor,
+    }
+
+    impl DummyChannel {
+        fn new() -> Self {
+            let tx: Transaction = encode::deserialize(&hex::decode("020000000001010e0ade\
+			f48412e4361325ac1c6e36411299ab09d4f083b9d8ddb55fbc06e1b0c00000000000feffffff0220a107000\
+			0000000220020f81d95e040bd0a493e38bae27bff52fe2bb58b93b293eb579c01c31b05c5af1dc072cfee54\
+			a3000016001434b1d6211af5551905dc2642d05f5b04d25a8fe80247304402207f570e3f0de50546aad25a8\
+			72e3df059d277e776dda4269fa0d2cc8c2ee6ec9a022054e7fae5ca94d47534c86705857c24ceea3ad51c69\
+			dd6051c5850304880fc43a012103cb11a1bacc223d98d91f1946c6752e358a5eb1a1c983b3e6fb15378f453\
+			b76bd00000000").unwrap()[..]).unwrap();
+
+            let constructor = InteractiveTxConstructor::new(
+                [0;32],
+                true,
+                true,
+                tx
+            );
+
+            Self { interactive_tx_constructor: constructor }
+        }
+
+        fn handle_add_tx_input(&mut self, serial_id: SerialId, input: TxAddInput, confirmed: bool) {
+            self.interactive_tx_constructor.receive_tx_add_input(serial_id, input, confirmed);
+        }
+    }
+
+    #[test]
+    fn test_add_tx_input() {
+        let mut channel = DummyChannel::new();
+        channel.handle_add_tx_input(
+            1233,
+            get_sample_tx_add_input(),
+            true,
+        );
+
+        assert_eq!(channel.interactive_tx_constructor.state, Negotiating);
+        assert_eq!(channel.interactive_tx_constructor.context.inputs.keys().len(), 2);
+    }
+
+    #[test]
+    fn test_add_tx_input_with_invalid_serial_id_parity() {
+        let mut channel = DummyChannel::new();
+        channel.handle_add_tx_input(
+            1234,
+            get_sample_tx_add_input(),
+            false,
+        );
+
+        assert_eq!(channel.interactive_tx_constructor.state, NegotiationFailed { error: IncorrectSerialIdParity });
+        assert_eq!(channel.interactive_tx_constructor.context.inputs.keys().len(), 0);
+    }
+
+    // Fixtures
+    fn get_sample_tx_add_input() -> TxAddInput {
+        return TxAddInput {
+            channel_id: [2; 32],
+            serial_id: 4886718345,
+            prevtx: TransactionU16LenLimited::new(Transaction {
+                version: 2,
+                lock_time: PackedLockTime(0),
+                input: vec![TxIn {
+                    previous_output: OutPoint { txid: Txid::from_hex("305bab643ee297b8b6b76b320792c8223d55082122cb606bf89382146ced9c77").unwrap(), index: 2 }.into_bitcoin_outpoint(),
+                    script_sig: Script::new(),
+                    sequence: Sequence(0xfffffffd),
+                    witness: Witness::from_vec(vec![
+                        hex::decode("304402206af85b7dd67450ad12c979302fac49dfacbc6a8620f49c5da2b5721cf9565ca502207002b32fed9ce1bf095f57aeb10c36928ac60b12e723d97d2964a54640ceefa701").unwrap(),
+                        hex::decode("0301ab7dc16488303549bfcdd80f6ae5ee4c20bf97ab5410bbd6b1bfa85dcd6944").unwrap()]),
+                }],
+                output: vec![
+                    TxOut {
+                        value: 12704566,
+                        script_pubkey: Address::from_str("bc1qzlffunw52jav8vwdu5x3jfk6sr8u22rmq3xzw2").unwrap().script_pubkey(),
+                    },
+                    TxOut {
+                        value: 245148,
+                        script_pubkey: Address::from_str("bc1qxmk834g5marzm227dgqvynd23y2nvt2ztwcw2z").unwrap().script_pubkey(),
+                    },
+                ],
+            }).unwrap(),
+            prevtx_out: 305419896,
+            sequence: 305419896,
+        };
+    }
+}
