@@ -17,6 +17,9 @@ use crate::ln::channel::TOTAL_BITCOIN_SUPPLY_SATOSHIS;
 use crate::ln::interactivetxs::ChannelMode::Indeterminate;
 use crate::ln::msgs;
 use crate::ln::msgs::SerialId;
+use crate::sign::EntropySource;
+
+use core::ops::Deref;
 
 /// The number of received `tx_add_input` messages during a negotiation at which point the
 /// negotiation MUST be failed.
@@ -107,6 +110,8 @@ pub(crate) struct NegotiationAborted(AbortReason);
 
 impl AcceptingChanges for Negotiating {}
 impl AcceptingChanges for OurTxComplete {}
+impl AcceptingChanges for TheirTxComplete {}
+
 impl AcceptingChanges for TheirTxComplete {}
 
 struct TxInputWithPrevOutput {
@@ -532,17 +537,19 @@ impl Default for ChannelMode {
 	fn default() -> Self { Indeterminate }
 }
 
-pub(crate) struct InteractiveTxConstructor {
+pub(crate) struct InteractiveTxConstructor<ES: Deref> where ES::Target: EntropySource {
 	mode: ChannelMode,
+	is_initiator: bool,
+	entropy_source: ES,
 }
 
 // TODO: `InteractiveTxConstructor` methods should return an `Err` when the state machine itself
 // errors out. There are two scenarios where that may occur: (1) Invalid data; causing negotiation
 // to abort (2) Illegal state transition. Check spec to see if it dictates what needs to happen
 // if a node receives an unexpected message.
-impl InteractiveTxConstructor {
+impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 	pub(crate) fn new(
-		channel_id: [u8; 32], feerate_sat_per_kw: u32, require_confirmed_inputs: bool,
+		entropy_source: ES, channel_id: [u8; 32], feerate_sat_per_kw: u32, require_confirmed_inputs: bool,
 		is_initiator: bool, base_tx: Transaction, did_send_tx_signatures: bool,
 	) -> Self {
 		let initial_state_machine = InteractiveTxStateMachine::new(
@@ -550,8 +557,21 @@ impl InteractiveTxConstructor {
 			did_send_tx_signatures
 		);
 		Self {
-			mode: ChannelMode::Negotiating(initial_state_machine)
+			mode: ChannelMode::Negotiating(initial_state_machine),
+			is_initiator,
+			entropy_source,
 		}
+	}
+
+	fn generate_local_serial_id(&self) -> SerialId {
+		let rand_bytes = self.entropy_source.get_secure_random_bytes();
+		let serial_id_bytes = [0u8; 8];
+		serial_id_bytes.copy_from_slice(&rand_bytes[..8]);
+		let mut serial_id: u64 = serial_id_bytes.to_be_bytes();
+		if serial_id.is_valid_for_initiator() != self.is_initiator {
+			serial_id ^= 1;
+		}
+		serial_id
 	}
 
 	pub(crate) fn abort_negotation(&mut self, reason: AbortReason) {
@@ -574,15 +594,17 @@ impl InteractiveTxConstructor {
 		self.handle_negotiating_receive(|state_machine| state_machine.receive_tx_remove_output(serial_id))
 	}
 
-	pub(crate) fn send_tx_add_input(&mut self, serial_id: SerialId, transaction_input: TxIn, previous_output: TxOut) {
-		self.handle_negotiating_send(|state_machine| state_machine.send_tx_add_input(serial_id, transaction_input, previous_output))
+	pub(crate) fn send_tx_add_input(&mut self, transaction_input: TxIn, previous_output: TxOut) {
+		let serial_id = self.generate_local_serial_id();
+		self.handle_negotiating_send(|state_machine| state_machine.send_tx_add_input(serial_id, transaction_input, previous_output));
 	}
 
 	pub(crate) fn send_tx_remove_input(&mut self, serial_id: SerialId) {
 		self.handle_negotiating_send(|state_machine| state_machine.send_tx_remove_input(serial_id))
 	}
 
-	pub(crate) fn send_tx_add_output(&mut self, serial_id: SerialId, transaction_output: TxOut) {
+	pub(crate) fn send_tx_add_output(&mut self, transaction_output: TxOut) {
+		let serial_id = self.generate_local_serial_id();
 		self.handle_negotiating_send(|state_machine| state_machine.send_tx_add_output(serial_id, transaction_output))
 	}
 
