@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::{TxIn, Sequence, Transaction, TxOut, OutPoint, Witness};
+use bitcoin::{TxIn, Sequence, Transaction, TxOut, OutPoint};
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::policy::MAX_STANDARD_TX_WEIGHT;
 use crate::ln::channel::TOTAL_BITCOIN_SUPPLY_SATOSHIS;
@@ -20,7 +20,6 @@ use crate::ln::msgs::SerialId;
 use crate::sign::EntropySource;
 
 use core::ops::Deref;
-use std::process::abort;
 
 /// The number of received `tx_add_input` messages during a negotiation at which point the
 /// negotiation MUST be failed.
@@ -41,8 +40,10 @@ impl SerialIdExt for SerialId {
 	fn is_valid_for_initiator(&self) -> bool { self % 2 == 0 }
 }
 
-pub(crate) enum AbortReason {
+#[derive(Debug)]
+pub enum AbortReason {
 	CounterpartyAborted,
+	UnexpectedCounterpartyMessage,
 	InputsNotConfirmed,
 	ReceivedTooManyTxAddInputs,
 	ReceivedTooManyTxAddOutputs,
@@ -95,37 +96,50 @@ pub(crate) enum AbortReason {
 //
 
 // Channel states that can receive `(send|receive)_tx_(add|remove)_(input|output)`
-pub(crate) trait AcceptingChanges {
+trait ProposingChanges {
+	fn into_negotiation_context(self) -> NegotiationContext;
+}
+trait AcceptingChanges {
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
 
 /// We are currently in the process of negotiating the transaction.
-pub(crate) struct Negotiating(NegotiationContext);
+#[derive(Debug)]
+struct Negotiating(NegotiationContext);
 /// We have sent a `tx_complete` message and are awaiting the counterparty's.
-pub(crate) struct OurTxComplete(NegotiationContext);
+#[derive(Debug)]
+struct OurTxComplete(NegotiationContext);
 /// We have received a `tx_complete` message and the counterparty is awaiting ours.
-pub(crate) struct TheirTxComplete(NegotiationContext);
+#[derive(Debug)]
+struct TheirTxComplete(NegotiationContext);
 /// We have exchanged consecutive `tx_complete` messages with the counterparty and the transaction
 /// negotiation is complete.
-pub(crate) struct NegotiationComplete(Transaction);
+#[derive(Debug)]
+struct NegotiationComplete(Transaction);
 /// The negotiation has failed and cannot be continued.
-pub(crate) struct NegotiationAborted(AbortReason);
+#[derive(Debug)]
+struct NegotiationAborted(AbortReason);
 
+impl ProposingChanges for Negotiating {
+	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
+}
+impl ProposingChanges for TheirTxComplete {
+	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
+}
 impl AcceptingChanges for Negotiating {
 	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
 }
 impl AcceptingChanges for OurTxComplete {
 	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
 }
-impl AcceptingChanges for TheirTxComplete {
-	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
-}
 
-struct TxInputWithPrevOutput {
+#[derive(Debug)]
+pub struct TxInputWithPrevOutput {
 	input: TxIn,
 	prev_output: TxOut,
 }
 
+#[derive(Debug)]
 struct NegotiationContext {
 	require_confirmed_inputs: bool,
 	holder_is_initiator: bool,
@@ -168,11 +182,267 @@ impl NegotiationContext {
 			.filter(|(serial_id, _)| !serial_id.is_valid_for_initiator())
 			.map(|(_, output)| output)
 	}
+
+	fn receive_tx_add_input(&mut self, msg: &msgs::TxAddInput, confirmed: bool) -> Result<(), AbortReason> {
+		// The interactive-txs spec calls for us to fail negotiation if the `prevtx` we receive is
+		// invalid. However, we would not need to account for this explicit negotiation failure
+		// mode here since `PeerManager` would already disconnect the peer if the `prevtx` is
+		// invalid; implicitly ending the negotiation.
+
+		if !self.is_valid_counterparty_serial_id(msg.serial_id) {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//     - the `serial_id` has the wrong parity
+			return Err(AbortReason::IncorrectSerialIdParity);
+		}
+
+		if msg.sequence >= 0xFFFFFFFE {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//    - `sequence` is set to `0xFFFFFFFE` or `0xFFFFFFFF`
+			return Err(AbortReason::IncorrectInputSequenceValue);
+		}
+
+		if self.require_confirmed_inputs && !confirmed {
+			return Err(AbortReason::InputsNotConfirmed);
+		}
+
+		let transaction = msg.prevtx.clone().into_transaction();
+
+		if let Some(tx_out) = transaction.output.get(msg.prevtx_out as usize) {
+			if !tx_out.script_pubkey.is_witness_program() {
+				// The receiving node:
+				//  - MUST fail the negotiation if:
+				//     - the `scriptPubKey` is not a witness program
+				return Err(AbortReason::PrevTxOutInvalid);
+			} else if !self.prevtx_outpoints.insert(
+				OutPoint {
+					txid: transaction.txid(),
+					vout: msg.prevtx_out
+				}
+			) {
+				// The receiving node:
+				//  - MUST fail the negotiation if:
+				//     - the `prevtx` and `prevtx_vout` are identical to a previously added
+				//       (and not removed) input's
+				return Err(AbortReason::PrevTxOutInvalid);
+			}
+		} else {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//     - `prevtx_vout` is greater or equal to the number of outputs on `prevtx`
+			return Err(AbortReason::PrevTxOutInvalid);
+		}
+
+		self.received_tx_add_input_count += 1;
+		if self.received_tx_add_input_count > MAX_RECEIVED_TX_ADD_INPUT_COUNT {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//     - if has received 4096 `tx_add_input` messages during this negotiation
+			return Err(AbortReason::ReceivedTooManyTxAddInputs);
+		}
+
+		let prev_out = if let Some(prev_out) = msg.prevtx.0.output.get(msg.prevtx_out as usize) {
+			prev_out.clone()
+		} else {
+			return Err(AbortReason::PrevTxOutInvalid);
+		};
+		if let None = self.inputs.insert(
+			msg.serial_id,
+			TxInputWithPrevOutput {
+				input: TxIn {
+					previous_output: OutPoint { txid: transaction.txid(), vout: msg.prevtx_out },
+					sequence: Sequence(msg.sequence),
+					..Default::default()
+				},
+				prev_output: prev_out
+			}
+		) {
+			Ok(())
+		} else {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//    - the `serial_id` is already included in the transaction
+			Err(AbortReason::DuplicateSerialId)
+		}
+	}
+
+	fn receive_tx_remove_input(&mut self, serial_id: SerialId) -> Result<(), AbortReason> {
+		if !self.is_valid_counterparty_serial_id(serial_id) {
+			return Err(AbortReason::IncorrectSerialIdParity);
+		}
+
+		if let Some(input) = self.inputs.remove(&serial_id) {
+			self.prevtx_outpoints.remove(&input.input.previous_output);
+			Ok(())
+		} else {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//    - the input or output identified by the `serial_id` was not added by the sender
+			//    - the `serial_id` does not correspond to a currently added input
+			Err(AbortReason::SerialIdUnknown)
+		}
+	}
+
+	fn receive_tx_add_output(&mut self, serial_id: u64, output: TxOut) -> Result<(), AbortReason> {
+		// The receiving node:
+		//  - MUST fail the negotiation if:
+		//     - the serial_id has the wrong parity
+		if !self.is_valid_counterparty_serial_id(serial_id) {
+			return Err(AbortReason::IncorrectSerialIdParity);
+		}
+
+		self.received_tx_add_output_count += 1;
+		if self.received_tx_add_output_count > MAX_RECEIVED_TX_ADD_OUTPUT_COUNT {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//     - if has received 4096 `tx_add_output` messages during this negotiation
+			return Err(AbortReason::ReceivedTooManyTxAddOutputs);
+		}
+
+		if output.value < output.script_pubkey.dust_value().to_sat() {
+			// The receiving node:
+			// - MUST fail the negotiation if:
+			//		- the sats amount is less than the dust_limit
+			return Err(AbortReason::ExceededDustLimit);
+		}
+		if output.value > TOTAL_BITCOIN_SUPPLY_SATOSHIS {
+			// The receiving node:
+			// - MUST fail the negotiation if:
+			//		- the sats amount is greater than 2,100,000,000,000,000 (TOTAL_BITCOIN_SUPPLY_SATOSHIS)
+			return Err(AbortReason::ExceededMaximumSatsAllowed);
+		}
+
+		// The receiving node:
+		//   - MUST accept P2WSH, P2WPKH, P2TR scripts
+		//   - MAY fail the negotiation if script is non-standard
+		if !output.script_pubkey.is_v0_p2wpkh() && !output.script_pubkey.is_v0_p2wsh() &&
+			!output.script_pubkey.is_v1_p2tr()
+		{
+			return Err(AbortReason::InvalidOutputScript);
+		}
+
+		if let None = self.outputs.insert(serial_id, output) {
+			Ok(())
+		} else {
+			// The receiving node:
+			//  - MUST fail the negotiation if:
+			//    - the `serial_id` is already included in the transaction
+			Err(AbortReason::DuplicateSerialId)
+		}
+	}
+
+	fn receive_tx_remove_output(&mut self, serial_id: SerialId) -> Result<(), AbortReason> {
+		if !self.is_valid_counterparty_serial_id(serial_id) {
+			return Err(AbortReason::IncorrectSerialIdParity);
+		}
+		if let Some(_) = self.outputs.remove(&serial_id) {
+			Ok(())
+		} else {
+			Err(AbortReason::SerialIdUnknown)
+		}
+	}
+
+	fn send_tx_add_input(&mut self, serial_id: u64, input: TxIn, prevout: TxOut) {
+		self.inputs.insert(
+			serial_id,
+			TxInputWithPrevOutput {
+				input,
+				prev_output: prevout
+			}
+		);
+	}
+
+	fn send_tx_add_output(&mut self, serial_id: SerialId, output: TxOut) {
+		self.outputs.insert(serial_id, output);
+	}
+
+	fn send_tx_remove_input(&mut self, serial_id: SerialId) {
+		self.inputs.remove(&serial_id);
+	}
+
+	fn send_tx_remove_output(&mut self, serial_id: SerialId) {
+		self.outputs.remove(&serial_id);
+	}
+
+	fn build_transaction(self) -> Result<Transaction, AbortReason> {
+		let tx_to_validate = Transaction {
+			version: self.base_tx.version,
+			lock_time: self.base_tx.lock_time,
+			input: self.inputs.values().map(|p| p.input.clone()).collect(),
+			output: self.outputs.values().cloned().collect(),
+		};
+
+		// The receiving node:
+		// MUST fail the negotiation if:
+
+		// - the peer's total input satoshis is less than their outputs
+		let total_input_amount: u64 = self.inputs.values().map(|p| p.prev_output.value).sum();
+		let total_output_amount = tx_to_validate.output.iter().map(|output| output.value).sum();
+		if total_input_amount < total_output_amount {
+			return Err(AbortReason::OutputsExceedInputs);
+		}
+
+		// - there are more than 252 inputs
+		// - there are more than 252 outputs
+		if self.inputs.len() > MAX_INPUTS_OUTPUTS_COUNT ||
+			self.outputs.len() > MAX_INPUTS_OUTPUTS_COUNT {
+			return Err(AbortReason::ExceededNumberOfInputsOrOutputs)
+		}
+
+		if tx_to_validate.weight() as u32 > MAX_STANDARD_TX_WEIGHT {
+			return Err(AbortReason::TransactionTooLarge)
+		}
+
+		// TODO:
+		// - Use existing rust-lightning/rust-bitcoin constants.
+		// - How do we enforce their fees cover the witness without knowing its expected length?
+		// 	 - Read eclair's code to see if they do this?
+		const INPUT_WEIGHT: u64 = (32 + 4 + 4) * WITNESS_SCALE_FACTOR as u64;
+		const OUTPUT_WEIGHT: u64 = 8 * WITNESS_SCALE_FACTOR as u64;
+
+		// - the peer's paid feerate does not meet or exceed the agreed feerate (based on the minimum fee).
+		if self.holder_is_initiator {
+			let non_initiator_fees_contributed: u64 =
+				self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>() -
+					self.non_initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
+			let non_initiator_contribution_weight =
+				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
+					self.non_initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
+			let required_non_initiator_contribution_fee =
+				self.feerate_sat_per_kw as u64 * 1000 / non_initiator_contribution_weight;
+			if non_initiator_fees_contributed < required_non_initiator_contribution_fee {
+				return Err(AbortReason::InsufficientFees);
+			}
+		} else {
+			// if is the non-initiator:
+			// 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
+			// 		input count, output count, locktime)
+			let initiator_fees_contributed: u64 =
+				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>() -
+					self.initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
+			let initiator_contribution_weight =
+				self.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
+					self.initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
+			let required_initiator_contribution_fee =
+				self.feerate_sat_per_kw as u64 * 1000 / initiator_contribution_weight;
+			let tx_common_fields_weight =
+				(4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) *
+					WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
+			let tx_common_fields_fee = self.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
+			if initiator_fees_contributed < tx_common_fields_fee + required_initiator_contribution_fee {
+				return Err(AbortReason::InsufficientFees);
+			}
+		}
+
+		return Ok(tx_to_validate)
+	}
 }
 
+#[derive(Debug)]
 struct InteractiveTxStateMachine<S>(S);
 
-type InteractiveTxStateMachineResult<S> =
+type InteractiveTxStateTransition<S> =
 	Result<InteractiveTxStateMachine<S>, InteractiveTxStateMachine<NegotiationAborted>>;
 
 impl InteractiveTxStateMachine<Negotiating> {
@@ -195,295 +465,73 @@ impl InteractiveTxStateMachine<Negotiating> {
 	}
 }
 
-impl<S> InteractiveTxStateMachine<S> where S: AcceptingChanges {
-	fn abort_negotiation(self, reason: AbortReason) -> InteractiveTxStateMachineResult<Negotiating> {
-		Err(InteractiveTxStateMachine(NegotiationAborted(reason)))
-	}
-
-	fn receive_tx_add_input(mut self, msg: &msgs::TxAddInput, confirmed: bool) -> InteractiveTxStateMachineResult<Negotiating> {
+impl<S: ProposingChanges> InteractiveTxStateMachine<S> {
+	fn send_tx_add_input(self, serial_id: u64, input: TxIn, prevout: TxOut) -> InteractiveTxStateMachine<Negotiating> {
 		let mut negotiation_context = self.0.into_negotiation_context();
-
-		// The interactive-txs spec calls for us to fail negotiation if the `prevtx` we receive is
-		// invalid. However, we would not need to account for this explicit negotiation failure
-		// mode here since `PeerManager` would already disconnect the peer if the `prevtx` is
-		// invalid; implicitly ending the negotiation.
-
-		if !negotiation_context.is_valid_counterparty_serial_id(msg.serial_id) {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//     - the `serial_id` has the wrong parity
-			return self.abort_negotiation(AbortReason::IncorrectSerialIdParity);
-		}
-
-		if msg.sequence >= 0xFFFFFFFE {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//    - `sequence` is set to `0xFFFFFFFE` or `0xFFFFFFFF`
-			return self.abort_negotiation(AbortReason::IncorrectInputSequenceValue);
-		}
-
-		if negotiation_context.require_confirmed_inputs && !confirmed {
-			return self.abort_negotiation(AbortReason::InputsNotConfirmed);
-		}
-
-		let transaction = msg.prevtx.clone().into_transaction();
-
-		if let Some(tx_out) = transaction.output.get(msg.prevtx_out as usize) {
-			if !tx_out.script_pubkey.is_witness_program() {
-				// The receiving node:
-				//  - MUST fail the negotiation if:
-				//     - the `scriptPubKey` is not a witness program
-				return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
-			} else if !negotiation_context.prevtx_outpoints.insert(
-				OutPoint {
-					txid: transaction.txid(),
-					vout: msg.prevtx_out
-				}
-			) {
-				// The receiving node:
-				//  - MUST fail the negotiation if:
-				//     - the `prevtx` and `prevtx_vout` are identical to a previously added
-				//       (and not removed) input's
-				return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
-			}
-		} else {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//     - `prevtx_vout` is greater or equal to the number of outputs on `prevtx`
-			return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
-		}
-
-		negotiation_context.received_tx_add_input_count += 1;
-		if negotiation_context.received_tx_add_input_count > MAX_RECEIVED_TX_ADD_INPUT_COUNT {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//     - if has received 4096 `tx_add_input` messages during this negotiation
-			return self.abort_negotiation(AbortReason::ReceivedTooManyTxAddInputs);
-		}
-
-		let prev_out = if let Some(prev_out) = msg.prevtx.0.output.get(msg.prevtx_out as usize) {
-			prev_out.clone()
-		} else {
-			return self.abort_negotiation(AbortReason::PrevTxOutInvalid);
-		};
-		if let None = negotiation_context.inputs.insert(
-			msg.serial_id,
-			TxInputWithPrevOutput {
-				input: TxIn {
-					previous_output: OutPoint { txid: transaction.txid(), vout: msg.prevtx_out },
-					sequence: Sequence(msg.sequence),
-					..Default::default()
-				},
-				prev_output: prev_out
-			}
-		) {
-			Ok(InteractiveTxStateMachine(Negotiating(negotiation_context)))
-		} else {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//    - the `serial_id` is already included in the transaction
-			self.abort_negotiation(AbortReason::DuplicateSerialId)
-		}
-	}
-
-	fn receive_tx_remove_input(mut self, serial_id: SerialId) -> InteractiveTxStateMachineResult<Negotiating> {
-		let mut negotiation_context = self.0.into_negotiation_context();
-		if !negotiation_context.is_valid_counterparty_serial_id(serial_id) {
-			return self.abort_negotiation(AbortReason::IncorrectSerialIdParity);
-		}
-
-		if let Some(input) = negotiation_context.inputs.remove(&serial_id) {
-			negotiation_context.prevtx_outpoints.remove(&input.input.previous_output);
-			Ok(InteractiveTxStateMachine(Negotiating(negotiation_context)))
-		} else {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//    - the input or output identified by the `serial_id` was not added by the sender
-			//    - the `serial_id` does not correspond to a currently added input
-			self.abort_negotiation(AbortReason::SerialIdUnknown)
-		}
-	}
-
-	fn receive_tx_add_output(mut self, serial_id: u64, output: TxOut) -> InteractiveTxStateMachineResult<Negotiating> {
-		let mut negotiation_context = self.0.into_negotiation_context();
-
-		// The receiving node:
-		//  - MUST fail the negotiation if:
-		//     - the serial_id has the wrong parity
-		if !negotiation_context.is_valid_counterparty_serial_id(serial_id) {
-			return self.abort_negotiation(AbortReason::IncorrectSerialIdParity);
-		}
-
-		negotiation_context.received_tx_add_output_count += 1;
-		if negotiation_context.received_tx_add_output_count > MAX_RECEIVED_TX_ADD_OUTPUT_COUNT {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//     - if has received 4096 `tx_add_output` messages during this negotiation
-			return self.abort_negotiation(AbortReason::ReceivedTooManyTxAddOutputs);
-		}
-
-		if output.value < output.script_pubkey.dust_value().to_sat() {
-			// The receiving node:
-			// - MUST fail the negotiation if:
-			//		- the sats amount is less than the dust_limit
-			return self.abort_negotiation(AbortReason::ExceededDustLimit);
-		}
-		if output.value > TOTAL_BITCOIN_SUPPLY_SATOSHIS {
-			// The receiving node:
-			// - MUST fail the negotiation if:
-			//		- the sats amount is greater than 2,100,000,000,000,000 (TOTAL_BITCOIN_SUPPLY_SATOSHIS)
-			return self.abort_negotiation(AbortReason::ExceededMaximumSatsAllowed);
-		}
-
-		// The receiving node:
-		//   - MUST accept P2WSH, P2WPKH, P2TR scripts
-		//   - MAY fail the negotiation if script is non-standard
-		if !output.script_pubkey.is_v0_p2wpkh() && !output.script_pubkey.is_v0_p2wsh() &&
-			!output.script_pubkey.is_v1_p2tr()
-		{
-			return self.abort_negotiation(AbortReason::InvalidOutputScript);
-		}
-
-		if let None = negotiation_context.outputs.insert(serial_id, output) {
-			Ok(InteractiveTxStateMachine(Negotiating(negotiation_context)))
-		} else {
-			// The receiving node:
-			//  - MUST fail the negotiation if:
-			//    - the `serial_id` is already included in the transaction
-			self.abort_negotiation(AbortReason::DuplicateSerialId)
-		}
-	}
-
-	fn receive_tx_remove_output(mut self, serial_id: SerialId) -> InteractiveTxStateMachineResult<Negotiating> {
-		let mut negotiation_context = self.0.into_negotiation_context();
-
-		if !negotiation_context.is_valid_counterparty_serial_id(serial_id) {
-			return self.abort_negotiation(AbortReason::IncorrectSerialIdParity);
-		}
-
-		if let Some(output) = negotiation_context.outputs.remove(&serial_id) {
-			Ok(InteractiveTxStateMachine(Negotiating(negotiation_context)))
-		} else {
-			self.abort_negotiation(AbortReason::SerialIdUnknown)
-		}
-	}
-
-	fn send_tx_add_input(mut self, serial_id: u64, input: TxIn, prevout: TxOut) -> InteractiveTxStateMachine<Negotiating> {
-		let mut negotiation_context = self.0.into_negotiation_context();
-		negotiation_context.inputs.insert(
-			serial_id,
-			TxInputWithPrevOutput {
-				input: input,
-				prev_output: prevout
-			}
-		);
+		negotiation_context.send_tx_add_input(serial_id, input, prevout);
 		InteractiveTxStateMachine(Negotiating(negotiation_context))
 	}
 
-	fn send_tx_add_output(mut self, serial_id: SerialId, output: TxOut) -> InteractiveTxStateMachine<Negotiating> {
+	fn send_tx_add_output(self, serial_id: SerialId, output: TxOut) -> InteractiveTxStateMachine<Negotiating> {
 		let mut negotiation_context = self.0.into_negotiation_context();
-		negotiation_context.outputs.insert(serial_id, output);
+		negotiation_context.send_tx_add_output(serial_id, output);
 		InteractiveTxStateMachine(Negotiating(negotiation_context))
 	}
 
-	fn send_tx_remove_input(mut self, serial_id: SerialId) -> InteractiveTxStateMachine<Negotiating> {
+	fn send_tx_remove_input(self, serial_id: SerialId) -> InteractiveTxStateMachine<Negotiating> {
 		let mut negotiation_context = self.0.into_negotiation_context();
-		negotiation_context.inputs.remove(&serial_id);
+		negotiation_context.send_tx_remove_input(serial_id);
 		InteractiveTxStateMachine(Negotiating(negotiation_context))
 	}
 
-	fn send_tx_remove_output(mut self, serial_id: SerialId) -> InteractiveTxStateMachine<Negotiating> {
+	fn send_tx_remove_output(self, serial_id: SerialId) -> InteractiveTxStateMachine<Negotiating> {
 		let mut negotiation_context = self.0.into_negotiation_context();
-		negotiation_context.outputs.remove(&serial_id);
+		negotiation_context.send_tx_remove_output(serial_id);
 		InteractiveTxStateMachine(Negotiating(negotiation_context))
-	}
-
-	fn send_tx_abort(mut self) -> InteractiveTxStateMachine<NegotiationAborted> {
-		// A sending node:
-		// 	- MUST NOT have already transmitted tx_signatures
-		// 	- SHOULD forget the current negotiation and reset their state.
-		todo!();
-	}
-
-	fn receive_tx_abort(mut self) -> InteractiveTxStateMachine<NegotiationAborted> {
-		todo!();
-	}
-
-	// TODO: This should only be on Our/TheirTxComplete?
-	fn build_transaction(mut self) -> Result<Transaction, AbortReason> {
-		let mut negotiation_context = self.0.into_negotiation_context();
-
-		let tx_to_validate = Transaction {
-			version: negotiation_context.base_tx.version,
-			lock_time: negotiation_context.base_tx.lock_time,
-			input: negotiation_context.inputs.values().map(|p| p.input.clone()).collect(),
-			output: negotiation_context.outputs.values().cloned().collect(),
-		};
-
-		// The receiving node:
-		// MUST fail the negotiation if:
-
-		// - the peer's total input satoshis is less than their outputs
-		let total_input_amount: u64 = negotiation_context.inputs.values().map(|p| p.prev_output.value).sum();
-		let total_output_amount = tx_to_validate.output.iter().map(|output| output.value).sum();
-		if total_input_amount < total_output_amount {
-			return Err(AbortReason::OutputsExceedInputs);
-		}
-
-		// - there are more than 252 inputs
-		// - there are more than 252 outputs
-		if negotiation_context.inputs.len() > MAX_INPUTS_OUTPUTS_COUNT ||
-			negotiation_context.outputs.len() > MAX_INPUTS_OUTPUTS_COUNT {
-			return Err(AbortReason::ExceededNumberOfInputsOrOutputs)
-		}
-
-		if tx_to_validate.weight() as u32 > MAX_STANDARD_TX_WEIGHT {
-			return Err(AbortReason::TransactionTooLarge)
-		}
-
-		// TODO:
-		// - Use existing rust-lightning/rust-bitcoin constants.
-		// - How do we enforce their fees cover the witness without knowing its expected length?
-		// 	 - Read eclair's code to see if they do this?
-		const INPUT_WEIGHT: u64 = (32 + 4 + 4) * WITNESS_SCALE_FACTOR as u64;
-		const OUTPUT_WEIGHT: u64 = 8 * WITNESS_SCALE_FACTOR as u64;
-
-		// - the peer's paid feerate does not meet or exceed the agreed feerate (based on the minimum fee).
-		if negotiation_context.holder_is_initiator {
-			let non_initiator_fees_contributed: u64 = negotiation_context.non_initiator_outputs_contributed().map(|output| output.value).sum::<u64>() -
-				negotiation_context.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>();
-			let non_initiator_contribution_weight = negotiation_context.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
-				negotiation_context.non_initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
-			let required_non_initiator_contribution_fee = negotiation_context.feerate_sat_per_kw as u64 * 1000 / non_initiator_contribution_weight;
-			if non_initiator_fees_contributed < required_non_initiator_contribution_fee {
-				return Err(AbortReason::InsufficientFees);
-			}
-		} else {
-			// if is the non-initiator:
-			// 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
-			// 		input count, output count, locktime)
-			let initiator_fees_contributed: u64 = negotiation_context.initiator_outputs_contributed().map(|output| output.value).sum::<u64>() -
-				negotiation_context.initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>();
-			let initiator_contribution_weight = negotiation_context.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
-				negotiation_context.initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
-			let required_initiator_contribution_fee = negotiation_context.feerate_sat_per_kw as u64 * 1000 / initiator_contribution_weight;
-			let tx_common_fields_weight = (4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) * WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
-			let tx_common_fields_fee = negotiation_context.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
-			if initiator_fees_contributed < tx_common_fields_fee + required_initiator_contribution_fee {
-				return Err(AbortReason::InsufficientFees);
-			}
-		}
-
-		return Ok(tx_to_validate)
 	}
 }
 
-impl InteractiveTxStateMachine<TheirTxComplete> {
-	fn send_tx_complete(self) -> InteractiveTxStateMachineResult<NegotiationComplete> {
-		match self.build_transaction() {
-			Ok(tx) => Ok(InteractiveTxStateMachine(NegotiationComplete(tx))),
-			Err(e) => Err(InteractiveTxStateMachine(NegotiationAborted(e))),
+impl<S: AcceptingChanges> InteractiveTxStateMachine<S> {
+	fn abort_negotiation(self, reason: AbortReason) -> InteractiveTxStateMachine<NegotiationAborted> {
+		InteractiveTxStateMachine(NegotiationAborted(reason))
+	}
+
+	fn receive_tx_add_input(self, msg: &msgs::TxAddInput, confirmed: bool) -> InteractiveTxStateTransition<Negotiating> {
+		let mut negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.receive_tx_add_input(msg, confirmed) {
+			Ok(_) => Ok(InteractiveTxStateMachine(Negotiating(negotiation_context))),
+			Err(abort_reason) => Err(InteractiveTxStateMachine(NegotiationAborted(abort_reason))),
 		}
+	}
+
+	fn receive_tx_remove_input(self, serial_id: SerialId) -> InteractiveTxStateTransition<Negotiating> {
+		let mut negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.receive_tx_remove_input(serial_id) {
+			Ok(_) => Ok(InteractiveTxStateMachine(Negotiating(negotiation_context))),
+			Err(abort_reason) => Err(InteractiveTxStateMachine(NegotiationAborted(abort_reason))),
+		}
+	}
+
+	fn receive_tx_add_output(self, serial_id: u64, output: TxOut) -> InteractiveTxStateTransition<Negotiating> {
+		let mut negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.receive_tx_add_output(serial_id, output) {
+			Ok(_) => Ok(InteractiveTxStateMachine(Negotiating(negotiation_context))),
+			Err(abort_reason) => Err(InteractiveTxStateMachine(NegotiationAborted(abort_reason))),
+		}
+	}
+
+	fn receive_tx_remove_output(self, serial_id: SerialId) -> InteractiveTxStateTransition<Negotiating> {
+		let mut negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.receive_tx_remove_output(serial_id) {
+			Ok(_) => Ok(InteractiveTxStateMachine(Negotiating(negotiation_context))),
+			Err(abort_reason) => Err(InteractiveTxStateMachine(NegotiationAborted(abort_reason))),
+		}
+	}
+}
+
+impl InteractiveTxStateMachine<Negotiating> {
+	fn send_tx_complete(self) -> InteractiveTxStateMachine<OurTxComplete> {
+		InteractiveTxStateMachine(OurTxComplete(self.0.0))
 	}
 }
 
@@ -491,17 +539,22 @@ impl InteractiveTxStateMachine<Negotiating> {
 	fn receive_tx_complete(self) -> InteractiveTxStateMachine<TheirTxComplete> {
 		InteractiveTxStateMachine(TheirTxComplete(self.0.0))
 	}
+}
 
-	fn send_tx_complete(self) -> InteractiveTxStateMachine<OurTxComplete> {
-		// TODO: Should we validate before transitioning states? If so, do we want to abort negotiation
-		// if our current transaction state is invalid?
-		InteractiveTxStateMachine(OurTxComplete(self.0.0))
+impl InteractiveTxStateMachine<TheirTxComplete> {
+	fn send_tx_complete(self) -> InteractiveTxStateTransition<NegotiationComplete> {
+		let negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.build_transaction() {
+			Ok(tx) => Ok(InteractiveTxStateMachine(NegotiationComplete(tx))),
+			Err(e) => Err(InteractiveTxStateMachine(NegotiationAborted(e))),
+		}
 	}
 }
 
 impl InteractiveTxStateMachine<OurTxComplete> {
-	fn receive_tx_complete(self) -> InteractiveTxStateMachineResult<NegotiationComplete> {
-		match self.build_transaction() {
+	fn receive_tx_complete(self) -> InteractiveTxStateTransition<NegotiationComplete> {
+		let negotiation_context = self.0.into_negotiation_context();
+		match negotiation_context.build_transaction() {
 			Ok(tx) => Ok(InteractiveTxStateMachine(NegotiationComplete(tx))),
 			Err(e) => Err(InteractiveTxStateMachine(NegotiationAborted(e))),
 		}
@@ -521,7 +574,7 @@ impl Default for ChannelMode {
 	fn default() -> Self { Indeterminate }
 }
 
-pub(crate) struct InteractiveTxConstructor<ES: Deref> where ES::Target: EntropySource {
+pub struct InteractiveTxConstructor<ES: Deref> where ES::Target: EntropySource {
 	mode: ChannelMode,
 	channel_id: [u8; 32],
 	is_initiator: bool,
@@ -530,7 +583,7 @@ pub(crate) struct InteractiveTxConstructor<ES: Deref> where ES::Target: EntropyS
 	outputs_to_contribute: Vec<TxOut>,
 }
 
-pub(crate) enum InteractiveTxMessageSend {
+pub enum InteractiveTxMessageSend {
 	TxAddInput(msgs::TxAddInput),
 	TxAddOutput(msgs::TxAddOutput),
 	TxComplete(msgs::TxComplete),
@@ -541,7 +594,7 @@ pub(crate) enum InteractiveTxMessageSend {
 // to abort (2) Illegal state transition. Check spec to see if it dictates what needs to happen
 // if a node receives an unexpected message.
 impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
-	pub(crate) fn new(
+	pub fn new(
 		entropy_source: ES, channel_id: [u8; 32], feerate_sat_per_kw: u32, require_confirmed_inputs: bool,
 		is_initiator: bool, base_tx: Transaction, did_send_tx_signatures: bool,
 		inputs_to_contribute: Vec<TxInputWithPrevOutput>, outputs_to_contribute: Vec<TxOut>,
@@ -578,10 +631,9 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 	}
 
 	// TODO: This also transitions the state machine, come up with a better name.
-	fn generate_message_send(&mut self) -> InteractiveTxMessageSend {
+	fn generate_message_send(&mut self) -> Result<InteractiveTxMessageSend, ()> {
 		if let Some(input_with_prevout) = self.inputs_to_contribute.pop() {
 			let serial_id = self.generate_local_serial_id();
-
 			let mode = core::mem::take(&mut self.mode);
 			self.mode =	match mode {
 				ChannelMode::Negotiating(c) => ChannelMode::Negotiating(
@@ -590,17 +642,20 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 				ChannelMode::TheirTxComplete(c) => ChannelMode::Negotiating(
 					c.send_tx_add_input(serial_id, input_with_prevout.input, input_with_prevout.prev_output)
 				),
-				_ => mode,
+				_ => ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::SerialIdUnknown))), // TODO
 			};
-
-			InteractiveTxMessageSend::TxAddInput(msgs::TxAddInput {
-				channel_id: self.channel_id,
-				serial_id,
-				// TODO: Needs real transaction and prevout
-				prevtx: msgs::TransactionU16LenLimited(Transaction { version: 0, lock_time: bitcoin::PackedLockTime::ZERO, input: vec![], output: vec![]}),
-				prevtx_out: 0,
-				sequence: Sequence::ENABLE_RBF_NO_LOCKTIME.into(),
-			})
+			if let ChannelMode::NegotiationAborted(abort_reason) = &self.mode {
+				Err(())
+			} else {
+				Ok(InteractiveTxMessageSend::TxAddInput(msgs::TxAddInput {
+					channel_id: self.channel_id,
+					serial_id,
+					// TODO: Needs real transaction and prevout
+					prevtx: msgs::TransactionU16LenLimited(Transaction { version: 0, lock_time: bitcoin::PackedLockTime::ZERO, input: vec![], output: vec![]}),
+					prevtx_out: 0,
+					sequence: Sequence::ENABLE_RBF_NO_LOCKTIME.into(),
+				}))
+			}
 		} else if let Some(output) = self.outputs_to_contribute.pop() {
 			let serial_id = self.generate_local_serial_id();
 			let mode = core::mem::take(&mut self.mode);
@@ -611,87 +666,90 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 				ChannelMode::TheirTxComplete(c) => ChannelMode::Negotiating(
 					c.send_tx_add_output(serial_id, output.clone())
 				),
-				_ => mode,
+				_ => ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::SerialIdUnknown))), // TODO
 			};
-			InteractiveTxMessageSend::TxAddOutput(msgs::TxAddOutput {
-				channel_id: self.channel_id,
-				serial_id,
-				sats: output.value,
-				script: output.script_pubkey,
-			})
+			if let ChannelMode::NegotiationAborted(abort_reason) = &self.mode {
+				Err(())
+			} else {
+				Ok(InteractiveTxMessageSend::TxAddOutput(msgs::TxAddOutput {
+					channel_id: self.channel_id,
+					serial_id,
+					sats: output.value,
+					script: output.script_pubkey,
+				}))
+			}
 		} else {
 			// TODO: Double check that we can transition back to Negotiating.
-			self.send_tx_complete();
-			InteractiveTxMessageSend::TxComplete(msgs::TxComplete { channel_id: self.channel_id })
+			let _ = self.send_tx_complete();
+			Ok(InteractiveTxMessageSend::TxComplete(msgs::TxComplete { channel_id: self.channel_id }))
 		}
 	}
 
-	pub(crate) fn receive_tx_add_input(&mut self, transaction_input: &msgs::TxAddInput, confirmed: bool) -> InteractiveTxMessageSend {
+	pub fn receive_tx_add_input(&mut self, transaction_input: &msgs::TxAddInput, confirmed: bool) -> Result<InteractiveTxMessageSend, ()> {
 		let mode = core::mem::take(&mut self.mode);
-		let state_machine = match mode {
+		let state_transition = match mode {
 			ChannelMode::Negotiating(c) => c.receive_tx_add_input(transaction_input, confirmed),
 			ChannelMode::OurTxComplete(c) => c.receive_tx_add_input(transaction_input, confirmed),
-			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::CounterpartyAborted))), // TODO: Use actual abort reason.
-		}.unwrap(); // TODO
-		self.mode = ChannelMode::Negotiating(state_machine);
+			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage))),
+		};
+		self.mode = match state_transition {
+			Ok(state_machine) => ChannelMode::Negotiating(state_machine),
+			Err(state_machine) => ChannelMode::NegotiationAborted(state_machine),
+		};
 		self.generate_message_send()
 	}
 
-	pub(crate) fn receive_tx_remove_input(&mut self, serial_id: SerialId) -> InteractiveTxMessageSend {
+	pub fn receive_tx_remove_input(&mut self, serial_id: SerialId) -> Result<InteractiveTxMessageSend, ()> {
 		let mode = core::mem::take(&mut self.mode);
-		let state_machine = match mode {
+		let state_transition = match mode {
 			ChannelMode::Negotiating(c) => c.receive_tx_remove_input(serial_id),
 			ChannelMode::OurTxComplete(c) => c.receive_tx_remove_input(serial_id),
-			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::CounterpartyAborted))), // TODO: Use actual abort reason.
-		}.unwrap(); // TODO
-		self.mode = ChannelMode::Negotiating(state_machine);
+			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage))),
+		};
+		self.mode = match state_transition {
+			Ok(state_machine) => ChannelMode::Negotiating(state_machine),
+			Err(state_machine) => ChannelMode::NegotiationAborted(state_machine),
+		};
 		self.generate_message_send()
 	}
 
-	pub(crate) fn receive_tx_add_output(&mut self, serial_id: SerialId, output: TxOut) -> InteractiveTxMessageSend {
+	pub fn receive_tx_add_output(&mut self, serial_id: SerialId, output: TxOut) -> Result<InteractiveTxMessageSend, ()> {
 		let mode = core::mem::take(&mut self.mode);
-		let state_machine = match mode {
+		let state_transition = match mode {
 			ChannelMode::Negotiating(c) => c.receive_tx_add_output(serial_id, output),
 			ChannelMode::OurTxComplete(c) => c.receive_tx_add_output(serial_id, output),
-			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::CounterpartyAborted))), // TODO: Use actual abort reason.
-		}.unwrap(); // TODO
-		self.mode = ChannelMode::Negotiating(state_machine);
+			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage))),
+		};
+		self.mode = match state_transition {
+			Ok(state_machine) => ChannelMode::Negotiating(state_machine),
+			Err(state_machine) => ChannelMode::NegotiationAborted(state_machine),
+		};
 		self.generate_message_send()
 	}
 
-	pub(crate) fn receive_tx_remove_output(&mut self, serial_id: SerialId) -> InteractiveTxMessageSend {
+	pub fn receive_tx_remove_output(&mut self, serial_id: SerialId) -> Result<InteractiveTxMessageSend, ()> {
 		let mode = core::mem::take(&mut self.mode);
-		let state_machine = match mode {
+		let state_transition = match mode {
 			ChannelMode::Negotiating(c) => c.receive_tx_remove_output(serial_id),
 			ChannelMode::OurTxComplete(c) => c.receive_tx_remove_output(serial_id),
-			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::CounterpartyAborted))), // TODO: Use actual abort reason.
-		}.unwrap(); // TODO
-		self.mode = ChannelMode::Negotiating(state_machine);
+			_ => Err(InteractiveTxStateMachine(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage))),
+		};
+		self.mode = match state_transition {
+			Ok(state_machine) => ChannelMode::Negotiating(state_machine),
+			Err(state_machine) => ChannelMode::NegotiationAborted(state_machine),
+		};
 		self.generate_message_send()
 	}
 
-	pub(crate) fn send_tx_complete(&mut self) {
-		let mode = core::mem::take(&mut self.mode);
-		self.mode = match mode {
-			ChannelMode::Negotiating(c) => { ChannelMode::OurTxComplete(c.send_tx_complete()) }
-			ChannelMode::TheirTxComplete(c) => {
-				match c.send_tx_complete() {
-					Ok(c) => ChannelMode::NegotiationComplete(c),
-					Err(c) => ChannelMode::NegotiationAborted(c)
-				}
-			}
-			_ => mode
-		}
-	}
-
-	pub(crate) fn receive_tx_complete(&mut self) -> Option<InteractiveTxMessageSend> {
+	// TODO: Expose built transaction if available
+	pub fn receive_tx_complete(&mut self) -> Result<Option<InteractiveTxMessageSend>, ()> {
 		let mode = core::mem::take(&mut self.mode);
 		let mut message_send = None;
 		match mode {
 			ChannelMode::Negotiating(c) => {
 				let their_tx_complete = c.receive_tx_complete();
 				self.mode = ChannelMode::TheirTxComplete(their_tx_complete);
-				message_send = Some(self.generate_message_send());
+				message_send = Some(self.generate_message_send()?);
 			}
 			ChannelMode::OurTxComplete(c) => {
 				self.mode = match c.receive_tx_complete() {
@@ -699,19 +757,31 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 					Err(c) => ChannelMode::NegotiationAborted(c)
 				};
 			}
-			_ => self.mode = mode,
+			_ => self.mode = ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage))),
 		};
-		message_send
+		if let ChannelMode::NegotiationAborted(_) = &self.mode {
+			Err(())
+		} else {
+			Ok(message_send)
+		}
 	}
 
-	pub(crate) fn abort_negotation(&mut self, reason: AbortReason) {
+	// TODO: Expose built transaction if available
+	pub fn send_tx_complete(&mut self) -> Result<(), ()> {
 		let mode = core::mem::take(&mut self.mode);
-		match mode {
-			ChannelMode::Negotiating(c) => c.abort_negotiation(reason),
-			ChannelMode::OurTxComplete(c) => c.abort_negotiation(reason),
-			ChannelMode::TheirTxComplete(c) => c.abort_negotiation(reason),
-			_ => self.mode = mode, // TODO: Return error
+		self.mode = match mode {
+			ChannelMode::Negotiating(c) => ChannelMode::OurTxComplete(c.send_tx_complete()),
+			ChannelMode::TheirTxComplete(c) => match c.send_tx_complete() {
+				Ok(c) => ChannelMode::NegotiationComplete(c),
+				Err(c) => ChannelMode::NegotiationAborted(c)
+			}
+			_ => ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::SerialIdUnknown))), // TODO
 		};
+		if let ChannelMode::NegotiationAborted(abort_reason) = &self.mode {
+			Err(())
+		} else {
+			Ok(())
+		}
 	}
 }
 
