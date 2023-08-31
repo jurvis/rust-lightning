@@ -106,6 +106,8 @@ trait AcceptingChanges {
 /// We are currently in the process of negotiating the transaction.
 #[derive(Debug)]
 struct Negotiating(NegotiationContext);
+struct ProposingNegotiating(NegotiationContext);
+struct AcceptingNegotiating(NegotiationContext);
 /// We have sent a `tx_complete` message and are awaiting the counterparty's.
 #[derive(Debug)]
 struct OurTxComplete(NegotiationContext);
@@ -442,11 +444,17 @@ impl NegotiationContext {
 #[derive(Debug)]
 struct InteractiveTxStateMachine<S>(S);
 
+impl<S: AcceptingChanges> AcceptingChanges for InteractiveTxStateMachine<S> {
+	fn into_negotiation_context(self) -> NegotiationContext {
+		self.0.into_negotiation_context()
+	}
+}
+
 type InteractiveTxStateTransition<S> =
 	Result<InteractiveTxStateMachine<S>, InteractiveTxStateMachine<NegotiationAborted>>;
 
 impl InteractiveTxStateMachine<Negotiating> {
-	fn new(
+	fn init(
 		feerate_sat_per_kw: u32, require_confirmed_inputs: bool, is_initiator: bool,
 		base_tx: Transaction, did_send_tx_signatures: bool,
 	) -> Self {
@@ -563,6 +571,8 @@ impl InteractiveTxStateMachine<OurTxComplete> {
 
 enum ChannelMode {
 	Negotiating(InteractiveTxStateMachine<Negotiating>),
+	ProposingNegotiating(InteractiveTxStateMachine<ProposingNegotiating>),
+	AcceptingNegotiating(InteractiveTxStateMachine<AcceptingNegotiating>),
 	OurTxComplete(InteractiveTxStateMachine<OurTxComplete>),
 	TheirTxComplete(InteractiveTxStateMachine<TheirTxComplete>),
 	NegotiationComplete(InteractiveTxStateMachine<NegotiationComplete>),
@@ -599,7 +609,7 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 		is_initiator: bool, base_tx: Transaction, did_send_tx_signatures: bool,
 		inputs_to_contribute: Vec<TxInputWithPrevOutput>, outputs_to_contribute: Vec<TxOut>,
 	) -> (Self, Option<InteractiveTxMessageSend>) {
-		let initial_state_machine = InteractiveTxStateMachine::new(
+		let initial_state_machine = InteractiveTxStateMachine::init(
 			feerate_sat_per_kw, require_confirmed_inputs, is_initiator, base_tx,
 			did_send_tx_signatures
 		);
@@ -612,7 +622,7 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 			outputs_to_contribute,
 		};
 		let message_send = if is_initiator {
-			Some(constructor.generate_message_send())
+			Some(constructor.generate_message_send().unwrap()) // TODO
 		} else {
 			None
 		};
@@ -680,8 +690,20 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 			}
 		} else {
 			// TODO: Double check that we can transition back to Negotiating.
-			let _ = self.send_tx_complete();
-			Ok(InteractiveTxMessageSend::TxComplete(msgs::TxComplete { channel_id: self.channel_id }))
+			let mode = core::mem::take(&mut self.mode);
+			self.mode = match mode {
+				ChannelMode::Negotiating(c) => ChannelMode::OurTxComplete(c.send_tx_complete()),
+				ChannelMode::TheirTxComplete(c) => match c.send_tx_complete() {
+					Ok(c) => ChannelMode::NegotiationComplete(c),
+					Err(c) => ChannelMode::NegotiationAborted(c)
+				}
+				_ => ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::SerialIdUnknown))), // TODO
+			};
+			if let ChannelMode::NegotiationAborted(abort_reason) = &self.mode {
+				Err(())
+			} else {
+				Ok(InteractiveTxMessageSend::TxComplete(msgs::TxComplete { channel_id: self.channel_id }))
+			}
 		}
 	}
 
@@ -763,24 +785,6 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 			Err(())
 		} else {
 			Ok(message_send)
-		}
-	}
-
-	// TODO: Expose built transaction if available
-	pub fn send_tx_complete(&mut self) -> Result<(), ()> {
-		let mode = core::mem::take(&mut self.mode);
-		self.mode = match mode {
-			ChannelMode::Negotiating(c) => ChannelMode::OurTxComplete(c.send_tx_complete()),
-			ChannelMode::TheirTxComplete(c) => match c.send_tx_complete() {
-				Ok(c) => ChannelMode::NegotiationComplete(c),
-				Err(c) => ChannelMode::NegotiationAborted(c)
-			}
-			_ => ChannelMode::NegotiationAborted(InteractiveTxStateMachine(NegotiationAborted(AbortReason::SerialIdUnknown))), // TODO
-		};
-		if let ChannelMode::NegotiationAborted(abort_reason) = &self.mode {
-			Err(())
-		} else {
-			Ok(())
 		}
 	}
 }
