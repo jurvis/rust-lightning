@@ -9,11 +9,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::{TxIn, Sequence, Transaction, TxOut, OutPoint};
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::policy::MAX_STANDARD_TX_WEIGHT;
-use crate::ln::channel::TOTAL_BITCOIN_SUPPLY_SATOSHIS;
+use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, PackedLockTime};
 
+use crate::ln::channel::TOTAL_BITCOIN_SUPPLY_SATOSHIS;
 use crate::ln::msgs;
 use crate::ln::msgs::SerialId;
 use crate::sign::EntropySource;
@@ -36,14 +36,14 @@ trait SerialIdExt {
 	fn is_valid_for_initiator(&self) -> bool;
 }
 impl SerialIdExt for SerialId {
-	fn is_valid_for_initiator(&self) -> bool { self % 2 == 0 }
+	fn is_valid_for_initiator(&self) -> bool {
+		self % 2 == 0
+	}
 }
 
 #[derive(Debug)]
 pub enum AbortReason {
-	CounterpartyAborted,
 	UnexpectedCounterpartyMessage,
-	InputsNotConfirmed,
 	ReceivedTooManyTxAddInputs,
 	ReceivedTooManyTxAddOutputs,
 	IncorrectInputSequenceValue,
@@ -53,7 +53,6 @@ pub enum AbortReason {
 	PrevTxOutInvalid,
 	ExceededMaximumSatsAllowed,
 	ExceededNumberOfInputsOrOutputs,
-	InvalidTransactionState,
 	TransactionTooLarge,
 	ExceededDustLimit,
 	InvalidOutputScript,
@@ -69,20 +68,18 @@ pub struct TxInputWithPrevOutput {
 
 #[derive(Debug)]
 struct NegotiationContext {
-	require_confirmed_inputs: bool,
 	holder_is_initiator: bool,
 	received_tx_add_input_count: u16,
 	received_tx_add_output_count: u16,
 	inputs: HashMap<SerialId, TxInputWithPrevOutput>,
 	prevtx_outpoints: HashSet<OutPoint>,
 	outputs: HashMap<SerialId, TxOut>,
-	base_tx: Transaction,
-	did_send_tx_signatures: bool,
+	tx_locktime: PackedLockTime,
 	feerate_sat_per_kw: u32,
 }
 
 impl NegotiationContext {
-	fn is_valid_counterparty_serial_id(&self, serial_id: SerialId) -> bool {
+	fn is_serial_id_valid_for_counterparty(&self, serial_id: SerialId) -> bool {
 		// A received `SerialId`'s parity must match the role of the counterparty.
 		self.holder_is_initiator == !serial_id.is_valid_for_initiator()
 	}
@@ -111,13 +108,13 @@ impl NegotiationContext {
 			.map(|(_, output)| output)
 	}
 
-	fn receive_tx_add_input(&mut self, msg: &msgs::TxAddInput, confirmed: bool) -> Result<(), AbortReason> {
+	fn remote_tx_add_input(&mut self, msg: &msgs::TxAddInput) -> Result<(), AbortReason> {
 		// The interactive-txs spec calls for us to fail negotiation if the `prevtx` we receive is
 		// invalid. However, we would not need to account for this explicit negotiation failure
 		// mode here since `PeerManager` would already disconnect the peer if the `prevtx` is
 		// invalid; implicitly ending the negotiation.
 
-		if !self.is_valid_counterparty_serial_id(msg.serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
 			//     - the `serial_id` has the wrong parity
@@ -131,10 +128,6 @@ impl NegotiationContext {
 			return Err(AbortReason::IncorrectInputSequenceValue);
 		}
 
-		if self.require_confirmed_inputs && !confirmed {
-			return Err(AbortReason::InputsNotConfirmed);
-		}
-
 		let transaction = msg.prevtx.clone().into_transaction();
 
 		if let Some(tx_out) = transaction.output.get(msg.prevtx_out as usize) {
@@ -143,12 +136,10 @@ impl NegotiationContext {
 				//  - MUST fail the negotiation if:
 				//     - the `scriptPubKey` is not a witness program
 				return Err(AbortReason::PrevTxOutInvalid);
-			} else if !self.prevtx_outpoints.insert(
-				OutPoint {
-					txid: transaction.txid(),
-					vout: msg.prevtx_out
-				}
-			) {
+			} else if !self.prevtx_outpoints.insert(OutPoint {
+				txid: transaction.txid(),
+				vout: msg.prevtx_out,
+			}) {
 				// The receiving node:
 				//  - MUST fail the negotiation if:
 				//     - the `prevtx` and `prevtx_vout` are identical to a previously added
@@ -175,17 +166,17 @@ impl NegotiationContext {
 		} else {
 			return Err(AbortReason::PrevTxOutInvalid);
 		};
-		if let None = self.inputs.insert(
-			msg.serial_id,
-			TxInputWithPrevOutput {
-				input: TxIn {
-					previous_output: OutPoint { txid: transaction.txid(), vout: msg.prevtx_out },
-					sequence: Sequence(msg.sequence),
-					..Default::default()
+		if let None = self.inputs.insert(msg.serial_id, TxInputWithPrevOutput {
+			input: TxIn {
+				previous_output: OutPoint {
+					txid: transaction.txid(),
+					vout: msg.prevtx_out,
 				},
-				prev_output: prev_out
-			}
-		) {
+				sequence: Sequence(msg.sequence),
+				..Default::default()
+			},
+			prev_output: prev_out,
+		}) {
 			Ok(())
 		} else {
 			// The receiving node:
@@ -195,12 +186,12 @@ impl NegotiationContext {
 		}
 	}
 
-	fn receive_tx_remove_input(&mut self, serial_id: SerialId) -> Result<(), AbortReason> {
-		if !self.is_valid_counterparty_serial_id(serial_id) {
+	fn remote_tx_remove_input(&mut self, msg: &msgs::TxRemoveInput) -> Result<(), AbortReason> {
+		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
 
-		if let Some(input) = self.inputs.remove(&serial_id) {
+		if let Some(input) = self.inputs.remove(&msg.serial_id) {
 			self.prevtx_outpoints.remove(&input.input.previous_output);
 			Ok(())
 		} else {
@@ -212,11 +203,11 @@ impl NegotiationContext {
 		}
 	}
 
-	fn receive_tx_add_output(&mut self, serial_id: u64, output: TxOut) -> Result<(), AbortReason> {
+	fn remote_tx_add_output(&mut self, msg: &msgs::TxAddOutput) -> Result<(), AbortReason> {
 		// The receiving node:
 		//  - MUST fail the negotiation if:
 		//     - the serial_id has the wrong parity
-		if !self.is_valid_counterparty_serial_id(serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
 
@@ -228,13 +219,13 @@ impl NegotiationContext {
 			return Err(AbortReason::ReceivedTooManyTxAddOutputs);
 		}
 
-		if output.value < output.script_pubkey.dust_value().to_sat() {
+		if msg.sats < msg.script.dust_value().to_sat() {
 			// The receiving node:
 			// - MUST fail the negotiation if:
 			//		- the sats amount is less than the dust_limit
 			return Err(AbortReason::ExceededDustLimit);
 		}
-		if output.value > TOTAL_BITCOIN_SUPPLY_SATOSHIS {
+		if msg.sats > TOTAL_BITCOIN_SUPPLY_SATOSHIS {
 			// The receiving node:
 			// - MUST fail the negotiation if:
 			//		- the sats amount is greater than 2,100,000,000,000,000 (TOTAL_BITCOIN_SUPPLY_SATOSHIS)
@@ -244,13 +235,15 @@ impl NegotiationContext {
 		// The receiving node:
 		//   - MUST accept P2WSH, P2WPKH, P2TR scripts
 		//   - MAY fail the negotiation if script is non-standard
-		if !output.script_pubkey.is_v0_p2wpkh() && !output.script_pubkey.is_v0_p2wsh() &&
-			!output.script_pubkey.is_v1_p2tr()
-		{
+		if !msg.script.is_v0_p2wpkh() && !msg.script.is_v0_p2wsh() && !msg.script.is_v1_p2tr() {
 			return Err(AbortReason::InvalidOutputScript);
 		}
 
-		if let None = self.outputs.insert(serial_id, output) {
+		let output = TxOut {
+			value: msg.sats,
+			script_pubkey: msg.script.clone(),
+		};
+		if let None = self.outputs.insert(msg.serial_id, output) {
 			Ok(())
 		} else {
 			// The receiving node:
@@ -260,45 +253,54 @@ impl NegotiationContext {
 		}
 	}
 
-	fn receive_tx_remove_output(&mut self, serial_id: SerialId) -> Result<(), AbortReason> {
-		if !self.is_valid_counterparty_serial_id(serial_id) {
+	fn remote_tx_remove_output(&mut self, msg: &msgs::TxRemoveOutput) -> Result<(), AbortReason> {
+		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
-		if let Some(_) = self.outputs.remove(&serial_id) {
+		if let Some(_) = self.outputs.remove(&msg.serial_id) {
 			Ok(())
 		} else {
 			Err(AbortReason::SerialIdUnknown)
 		}
 	}
 
-	fn send_tx_add_input(&mut self, msg: &msgs::TxAddInput) -> Result<(), AbortReason> {
+	fn local_tx_add_input(&mut self, msg: &msgs::TxAddInput) {
 		let tx = msg.prevtx.clone().into_transaction();
 		let input = TxIn {
-			previous_output: OutPoint { txid: tx.txid(), vout: msg.prevtx_out },
+			previous_output: OutPoint {
+				txid: tx.txid(),
+				vout: msg.prevtx_out,
+			},
 			sequence: Sequence(msg.sequence),
 			..Default::default()
 		};
-		let prev_output = tx.output.get(msg.prevtx_out as usize).ok_or(AbortReason::PrevTxOutInvalid)?.clone();
-		self.inputs.insert(msg.serial_id, TxInputWithPrevOutput { input, prev_output });
-		Ok(())
+		debug_assert!((msg.prevtx_out as usize) < tx.output.len());
+		let prev_output = &tx.output[msg.prevtx_out as usize];
+		self.inputs.insert(msg.serial_id, TxInputWithPrevOutput {
+			input,
+			prev_output: prev_output.clone(),
+		});
 	}
 
-	fn send_tx_add_output(&mut self, serial_id: SerialId, output: TxOut) {
-		self.outputs.insert(serial_id, output);
+	fn local_tx_add_output(&mut self, msg: &msgs::TxAddOutput) {
+		self.outputs.insert(msg.serial_id, TxOut {
+			value: msg.sats,
+			script_pubkey: msg.script.clone(),
+		});
 	}
 
-	fn send_tx_remove_input(&mut self, serial_id: SerialId) {
-		self.inputs.remove(&serial_id);
+	fn local_tx_remove_input(&mut self, msg: &msgs::TxRemoveInput) {
+		self.inputs.remove(&msg.serial_id);
 	}
 
-	fn send_tx_remove_output(&mut self, serial_id: SerialId) {
-		self.outputs.remove(&serial_id);
+	fn local_tx_remove_output(&mut self, msg: &msgs::TxRemoveOutput) {
+		self.outputs.remove(&msg.serial_id);
 	}
 
 	fn build_transaction(self) -> Result<Transaction, AbortReason> {
 		let tx_to_validate = Transaction {
-			version: self.base_tx.version,
-			lock_time: self.base_tx.lock_time,
+			version: 2,
+			lock_time: self.tx_locktime,
 			input: self.inputs.values().map(|p| p.input.clone()).collect(),
 			output: self.outputs.values().cloned().collect(),
 		};
@@ -315,13 +317,12 @@ impl NegotiationContext {
 
 		// - there are more than 252 inputs
 		// - there are more than 252 outputs
-		if self.inputs.len() > MAX_INPUTS_OUTPUTS_COUNT ||
-			self.outputs.len() > MAX_INPUTS_OUTPUTS_COUNT {
-			return Err(AbortReason::ExceededNumberOfInputsOrOutputs)
+		if self.inputs.len() > MAX_INPUTS_OUTPUTS_COUNT || self.outputs.len() > MAX_INPUTS_OUTPUTS_COUNT {
+			return Err(AbortReason::ExceededNumberOfInputsOrOutputs);
 		}
 
 		if tx_to_validate.weight() as u32 > MAX_STANDARD_TX_WEIGHT {
-			return Err(AbortReason::TransactionTooLarge)
+			return Err(AbortReason::TransactionTooLarge);
 		}
 
 		// TODO:
@@ -334,11 +335,11 @@ impl NegotiationContext {
 		// - the peer's paid feerate does not meet or exceed the agreed feerate (based on the minimum fee).
 		if self.holder_is_initiator {
 			let non_initiator_fees_contributed: u64 =
-				self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>() -
-					self.non_initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
+				self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>()
+				- self.non_initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
 			let non_initiator_contribution_weight =
-				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
-					self.non_initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
+				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT
+				+ self.non_initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
 			let required_non_initiator_contribution_fee =
 				self.feerate_sat_per_kw as u64 * 1000 / non_initiator_contribution_weight;
 			if non_initiator_fees_contributed < required_non_initiator_contribution_fee {
@@ -349,8 +350,8 @@ impl NegotiationContext {
 			// 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
 			// 		input count, output count, locktime)
 			let initiator_fees_contributed: u64 =
-				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>() -
-					self.initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
+				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>()
+					- self.initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
 			let initiator_contribution_weight =
 				self.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
 					self.initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
@@ -365,7 +366,7 @@ impl NegotiationContext {
 			}
 		}
 
-		return Ok(tx_to_validate)
+		Ok(tx_to_validate)
 	}
 }
 
@@ -411,46 +412,37 @@ trait RemoteState: State {
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
 
-
-/// We are currently in the process of negotiating the transaction.
-#[derive(Debug)]
-struct LocalChange(NegotiationContext);
-#[derive(Debug)]
-struct RemoteChange(NegotiationContext);
-/// We have sent a `tx_complete` message and are awaiting the counterparty's.
-#[derive(Debug)]
-struct LocalTxComplete(NegotiationContext);
-/// We have received a `tx_complete` message and the counterparty is awaiting ours.
-#[derive(Debug)]
-struct RemoteTxComplete(NegotiationContext);
-/// We have exchanged consecutive `tx_complete` messages with the counterparty and the transaction
-/// negotiation is complete.
-#[derive(Debug)]
-struct NegotiationComplete(Transaction);
-/// The negotiation has failed and cannot be continued.
-#[derive(Debug)]
-struct NegotiationAborted(AbortReason);
-
-impl State for LocalChange {}
-impl State for RemoteChange {}
-impl State for LocalTxComplete {}
-impl State for RemoteTxComplete {}
-impl State for NegotiationComplete {}
-impl State for NegotiationAborted {}
-
-impl LocalState for LocalChange {
-	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
-}
-impl LocalState for LocalTxComplete {
-	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
+macro_rules! define_state {
+	(LOCAL_STATE, $state: ident, $doc: expr) => {
+		define_state!($state, NegotiationContext, $doc);
+		impl LocalState for $state {
+			fn into_negotiation_context(self) -> NegotiationContext {
+				self.0
+			}
+		}
+	};
+	(REMOTE_STATE, $state: ident, $doc: expr) => {
+		define_state!($state, NegotiationContext, $doc);
+		impl RemoteState for $state {
+			fn into_negotiation_context(self) -> NegotiationContext {
+				self.0
+			}
+		}
+	};
+	($state: ident, $inner: ident, $doc: expr) => {
+		#[doc = $doc]
+		#[derive(Debug)]
+		struct $state($inner);
+		impl State for $state {}
+	};
 }
 
-impl RemoteState for RemoteChange {
-	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
-}
-impl RemoteState for RemoteTxComplete {
-	fn into_negotiation_context(self) -> NegotiationContext { self.0 }
-}
+define_state!(LOCAL_STATE, LocalChange, "We have sent a message to the counterparty that has affected our negotiation state.");
+define_state!(LOCAL_STATE, LocalTxComplete, "We have sent a `tx_complete` message and are awaiting the counterparty's.");
+define_state!(REMOTE_STATE, RemoteChange, "We have received a message from the counterparty that has affected our negotiation state.");
+define_state!(REMOTE_STATE, RemoteTxComplete, "We have received a `tx_complete` message and the counterparty is awaiting ours.");
+define_state!(NegotiationComplete, Transaction, "We have exchanged consecutive `tx_complete` messages with the counterparty and the transaction negotiation is complete.");
+define_state!(NegotiationAborted, AbortReason, "The negotiation has failed and cannot be continued.");
 
 type StateTransitionResult<S> = Result<S, AbortReason>;
 
@@ -458,131 +450,63 @@ trait StateTransition<NewState: State, TransitionData> {
 	fn transition(self, data: TransitionData) -> StateTransitionResult<NewState>;
 }
 
-macro_rules! define_state_transition {
+macro_rules! define_state_transitions {
+	(LOCAL_STATE, [$(DATA $data: ty, TRANSITION $transition: ident),+]) => {
+		$(
+			impl<S: LocalState> StateTransition<RemoteChange, $data> for S {
+				fn transition(self, data: $data) -> StateTransitionResult<RemoteChange> {
+					let mut context = self.into_negotiation_context();
+					let _ = context.$transition(data)?;
+					Ok(RemoteChange(context))
+				}
+			}
+		 )*
+	};
+	(REMOTE_STATE, [$(DATA $data: ty, TRANSITION $transition: ident),+]) => {
+		$(
+			impl<S: RemoteState> StateTransition<LocalChange, $data> for S {
+				fn transition(self, data: $data) -> StateTransitionResult<LocalChange> {
+					let mut context = self.into_negotiation_context();
+					let _ = context.$transition(data);
+					Ok(LocalChange(context))
+				}
+			}
+		 )*
+	};
+	(TX_COMPLETE_AS_ACK, $from_state: ident, $to_state: ident) => {
+		impl StateTransition<$to_state, &msgs::TxComplete> for $from_state {
+			fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<$to_state> {
+				Ok($to_state(self.into_negotiation_context()))
+			}
+		}
+	};
+	(TX_COMPLETE, $from_state: ident) => {
+		impl StateTransition<NegotiationComplete, &msgs::TxComplete> for $from_state {
+			fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<NegotiationComplete> {
+				let context = self.into_negotiation_context();
+				let tx = context.build_transaction()?;
+				Ok(NegotiationComplete(tx))
+			}
+		}
+	};
 }
 
-// impl<S: LocalState> StateTransition<RemoteChange, (&msgs::TxAddInput, bool)> for S {
-//     fn transition(self, data: (&msgs::TxAddInput, bool)) -> StateTransitionResult<RemoteChange> {
-// 		let mut context = self.into_negotiation_context();
-// 		context.receive_tx_add_input(data.0, data.1)?;
-// 		Ok(RemoteChange(context))
-//     }
-// }
-// impl<S: RemoteState> StateTransition<LocalChange, &msgs::TxAddInput> for S {
-//     fn transition(self, data: &msgs::TxAddInput) -> StateTransitionResult<LocalChange> {
-// 		let mut context = self.into_negotiation_context();
-// 		context.send_tx_add_input(data)?;
-// 		Ok(LocalChange(context))
-//     }
-// }
-define_state_transitions!(
-	[
-		(&msgs::TxAddInput, bool),
-		&msgs::TxRemoveInput,
-		&msgs::TxAddOutput,
-		&msgs::TxRemoveOutput,
-	]
-	[
-		tx_add_input,
-		tx_remove_input,
-		tx_add_output,
-		tx_remove_output,
-	],
-);
-
-impl<S: LocalState> StateTransition<RemoteChange, (&msgs::TxAddInput, bool)> for S {
-    fn transition(self, data: (&msgs::TxAddInput, bool)) -> StateTransitionResult<RemoteChange> {
-		let mut context = self.into_negotiation_context();
-		context.receive_tx_add_input(data.0, data.1)?;
-		Ok(RemoteChange(context))
-    }
-}
-
-impl<S: LocalState> StateTransition<RemoteChange, &msgs::TxAddOutput> for S {
-    fn transition(self, data: &msgs::TxAddOutput) -> StateTransitionResult<RemoteChange> {
-		let mut context = self.into_negotiation_context();
-		let output = TxOut { value: data.sats, script_pubkey: data.script.clone() };
-		context.receive_tx_add_output(data.serial_id, output)?;
-		Ok(RemoteChange(context))
-    }
-}
-
-impl<S: LocalState> StateTransition<RemoteChange, &msgs::TxRemoveInput> for S {
-    fn transition(self, data: &msgs::TxRemoveInput) -> StateTransitionResult<RemoteChange> {
-		let mut context = self.into_negotiation_context();
-		context.receive_tx_remove_input(data.serial_id)?;
-		Ok(RemoteChange(context))
-    }
-}
-
-impl<S: LocalState> StateTransition<RemoteChange, &msgs::TxRemoveOutput> for S {
-    fn transition(self, data: &msgs::TxRemoveOutput) -> StateTransitionResult<RemoteChange> {
-		let mut context = self.into_negotiation_context();
-		context.receive_tx_remove_output(data.serial_id)?;
-		Ok(RemoteChange(context))
-    }
-}
-
-impl<S: RemoteState> StateTransition<LocalChange, &msgs::TxAddInput> for S {
-    fn transition(self, data: &msgs::TxAddInput) -> StateTransitionResult<LocalChange> {
-		let mut context = self.into_negotiation_context();
-		context.send_tx_add_input(data)?;
-		Ok(LocalChange(context))
-    }
-}
-
-impl<S: RemoteState> StateTransition<LocalChange, &msgs::TxAddOutput> for S {
-    fn transition(self, data: &msgs::TxAddOutput) -> StateTransitionResult<LocalChange> {
-		let mut context = self.into_negotiation_context();
-		let output = TxOut { value: data.sats, script_pubkey: data.script.clone() };
-		context.send_tx_add_output(data.serial_id, output);
-		Ok(LocalChange(context))
-    }
-}
-
-impl<S: RemoteState> StateTransition<LocalChange, &msgs::TxRemoveInput> for S {
-    fn transition(self, data: &msgs::TxRemoveInput) -> StateTransitionResult<LocalChange> {
-		let mut context = self.into_negotiation_context();
-		context.send_tx_remove_input(data.serial_id);
-		Ok(LocalChange(context))
-    }
-}
-
-impl<S: RemoteState> StateTransition<LocalChange, &msgs::TxRemoveOutput> for S {
-    fn transition(self, data: &msgs::TxRemoveOutput) -> StateTransitionResult<LocalChange> {
-		let mut context = self.into_negotiation_context();
-		context.send_tx_remove_output(data.serial_id);
-		Ok(LocalChange(context))
-    }
-}
-
-impl StateTransition<RemoteTxComplete, &msgs::TxComplete> for LocalChange {
-    fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<RemoteTxComplete> {
-		Ok(RemoteTxComplete(self.into_negotiation_context()))
-    }
-}
-
-impl StateTransition<LocalTxComplete, &msgs::TxComplete> for RemoteChange {
-    fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<LocalTxComplete> {
-		Ok(LocalTxComplete(self.into_negotiation_context()))
-    }
-}
-
-impl StateTransition<NegotiationComplete, &msgs::TxComplete> for LocalTxComplete {
-    fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<NegotiationComplete> {
-		let context = self.into_negotiation_context();
-		let tx = context.build_transaction()?;
-		Ok(NegotiationComplete(tx))
-    }
-}
-
-impl StateTransition<NegotiationComplete, &msgs::TxComplete> for RemoteTxComplete {
-    fn transition(self, _data: &msgs::TxComplete) -> StateTransitionResult<NegotiationComplete> {
-		let context = self.into_negotiation_context();
-		let tx = context.build_transaction()?;
-		Ok(NegotiationComplete(tx))
-    }
-}
+define_state_transitions!(LOCAL_STATE, [
+	DATA &msgs::TxAddInput, TRANSITION remote_tx_add_input,
+	DATA &msgs::TxRemoveInput, TRANSITION remote_tx_remove_input,
+	DATA &msgs::TxAddOutput, TRANSITION remote_tx_add_output,
+	DATA &msgs::TxRemoveOutput, TRANSITION remote_tx_remove_output
+]);
+define_state_transitions!(REMOTE_STATE, [
+	DATA &msgs::TxAddInput, TRANSITION local_tx_add_input,
+	DATA &msgs::TxRemoveInput, TRANSITION local_tx_remove_input,
+	DATA &msgs::TxAddOutput, TRANSITION local_tx_add_output,
+	DATA &msgs::TxRemoveOutput, TRANSITION local_tx_remove_output
+]);
+define_state_transitions!(TX_COMPLETE_AS_ACK, LocalChange, RemoteTxComplete);
+define_state_transitions!(TX_COMPLETE_AS_ACK, RemoteChange, LocalTxComplete);
+define_state_transitions!(TX_COMPLETE, LocalTxComplete);
+define_state_transitions!(TX_COMPLETE, RemoteTxComplete);
 
 #[derive(Debug)]
 enum StateMachine {
@@ -596,25 +520,48 @@ enum StateMachine {
 }
 
 impl Default for StateMachine {
-	fn default() -> Self { Self::Indeterminate }
+	fn default() -> Self {
+		Self::Indeterminate
+	}
+}
+
+macro_rules! define_state_machine_transitions {
+	($transition: ident, $msg: ty, [$(FROM $from_state: ident, TO $to_state: ident),+]) => {
+		fn $transition(self, msg: $msg) -> StateMachine {
+			match self {
+				$(
+					Self::$from_state(s) => match s.transition(msg) {
+						Ok(new_state) => StateMachine::$to_state(new_state),
+						Err(abort_reason) => StateMachine::NegotiationAborted(NegotiationAborted(abort_reason)),
+					}
+				 )*
+				_ => StateMachine::NegotiationAborted(NegotiationAborted(AbortReason::UnexpectedCounterpartyMessage)),
+			}
+		}
+	};
+	(LOCAL_OR_REMOTE_CHANGE, $to_local_transition: ident, $to_remote_transition: ident, $msg: ty) => {
+		define_state_machine_transitions!($to_local_transition, $msg, [
+			FROM RemoteChange, TO LocalChange,
+			FROM RemoteTxComplete, TO LocalChange
+		]);
+		define_state_machine_transitions!($to_remote_transition, $msg, [
+			FROM LocalChange, TO RemoteChange,
+			FROM LocalTxComplete, TO RemoteChange
+		]);
+	};
 }
 
 impl StateMachine {
-	fn new(
-		feerate_sat_per_kw: u32, require_confirmed_inputs: bool, is_initiator: bool,
-		base_tx: Transaction, did_send_tx_signatures: bool,
-	) -> Self {
+	fn new(feerate_sat_per_kw: u32, is_initiator: bool, tx_locktime: PackedLockTime) -> Self {
 		let context = NegotiationContext {
-			 require_confirmed_inputs,
-			 base_tx,
-			 did_send_tx_signatures,
-			 holder_is_initiator: is_initiator,
-			 received_tx_add_input_count: 0,
-			 received_tx_add_output_count: 0,
-			 inputs: HashMap::new(),
-			 prevtx_outpoints: HashSet::new(),
-			 outputs: HashMap::new(),
-			 feerate_sat_per_kw,
+			tx_locktime,
+			holder_is_initiator: is_initiator,
+			received_tx_add_input_count: 0,
+			received_tx_add_output_count: 0,
+			inputs: HashMap::new(),
+			prevtx_outpoints: HashSet::new(),
+			outputs: HashMap::new(),
+			feerate_sat_per_kw,
 		};
 		if is_initiator {
 			Self::RemoteChange(RemoteChange(context))
@@ -622,108 +569,38 @@ impl StateMachine {
 			Self::LocalChange(LocalChange(context))
 		}
 	}
+
+	define_state_machine_transitions!(
+		LOCAL_OR_REMOTE_CHANGE, local_tx_add_input, remote_tx_add_input, &msgs::TxAddInput
+	);
+	define_state_machine_transitions!(
+		LOCAL_OR_REMOTE_CHANGE, local_tx_add_output, remote_tx_add_output, &msgs::TxAddOutput
+	);
+	define_state_machine_transitions!(
+		LOCAL_OR_REMOTE_CHANGE, local_tx_remove_input, remote_tx_remove_input, &msgs::TxRemoveInput
+	);
+	define_state_machine_transitions!(
+		LOCAL_OR_REMOTE_CHANGE, local_tx_remove_output, remote_tx_remove_output, &msgs::TxRemoveOutput
+	);
+	define_state_machine_transitions!(local_tx_complete, &msgs::TxComplete, [
+		FROM RemoteChange, TO LocalTxComplete,
+		FROM RemoteTxComplete, TO NegotiationComplete
+	]);
+	define_state_machine_transitions!(remote_tx_complete, &msgs::TxComplete, [
+		FROM LocalChange, TO RemoteTxComplete,
+		FROM LocalTxComplete, TO NegotiationComplete
+	]);
 }
 
-type StateMachineTransitionResult = Result<StateMachine, AbortReason>;
-
-impl StateMachine {
-	fn receive_tx_add_input(self, msg: &msgs::TxAddInput, confirmed: bool) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::LocalChange(s) => s.transition((msg, confirmed)),
-			Self::LocalTxComplete(s) => s.transition((msg, confirmed)),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage),
-		}?;
-		Ok(StateMachine::RemoteChange(new_state))
-	}
-
-	fn receive_tx_add_output(self, msg: &msgs::TxAddOutput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::LocalChange(s) => s.transition(msg),
-			Self::LocalTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage),
-		}?;
-		Ok(StateMachine::RemoteChange(new_state))
-	}
-
-	fn receive_tx_remove_input(self, msg: &msgs::TxRemoveInput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::LocalChange(s) => s.transition(msg),
-			Self::LocalTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage),
-		}?;
-		Ok(StateMachine::RemoteChange(new_state))
-	}
-
-	fn receive_tx_remove_output(self, msg: &msgs::TxRemoveOutput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::LocalChange(s) => s.transition(msg),
-			Self::LocalTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage),
-		}?;
-		Ok(StateMachine::RemoteChange(new_state))
-	}
-
-	fn send_tx_add_input(self, msg: &msgs::TxAddInput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::RemoteChange(s) => s.transition(msg),
-			Self::RemoteTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage), // TODO
-		}?;
-		Ok(StateMachine::LocalChange(new_state))
-	}
-
-	fn send_tx_add_output(self, msg: &msgs::TxAddOutput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::RemoteChange(s) => s.transition(msg),
-			Self::RemoteTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage), // TODO
-		}?;
-		Ok(StateMachine::LocalChange(new_state))
-	}
-
-	fn send_tx_remove_input(self, msg: &msgs::TxRemoveInput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::RemoteChange(s) => s.transition(msg),
-			Self::RemoteTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage), // TODO
-		}?;
-		Ok(StateMachine::LocalChange(new_state))
-	}
-
-	fn send_tx_remove_output(self, msg: &msgs::TxRemoveOutput) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::RemoteChange(s) => s.transition(msg),
-			Self::RemoteTxComplete(s) => s.transition(msg),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage), // TODO
-		}?;
-		Ok(StateMachine::LocalChange(new_state))
-	}
-
-	fn receive_tx_complete(self, msg: &msgs::TxComplete) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::LocalChange(s) => s.transition(msg).map(|s| StateMachine::RemoteTxComplete(s)),
-			Self::LocalTxComplete(s) => s.transition(msg).map(|s| StateMachine::NegotiationComplete(s)),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage),
-		}?;
-		Ok(new_state)
-	}
-
-	fn send_tx_complete(self, msg: &msgs::TxComplete) -> StateMachineTransitionResult {
-		let new_state = match self {
-			Self::RemoteChange(s) => s.transition(msg).map(|s| StateMachine::LocalTxComplete(s)),
-			Self::RemoteTxComplete(s) => s.transition(msg).map(|s| StateMachine::NegotiationComplete(s)),
-			_ => Err(AbortReason::UnexpectedCounterpartyMessage), // TODO
-		}?;
-		Ok(new_state)
-	}
-}
-
-pub struct InteractiveTxConstructor<ES: Deref> where ES::Target: EntropySource {
+pub struct InteractiveTxConstructor<ES: Deref>
+where
+	ES::Target: EntropySource,
+{
 	state_machine: StateMachine,
 	channel_id: [u8; 32],
 	is_initiator: bool,
 	entropy_source: ES,
-	inputs_to_contribute: Vec<TxInputWithPrevOutput>,
+	inputs_to_contribute: Vec<(TxIn, Transaction)>,
 	outputs_to_contribute: Vec<TxOut>,
 }
 
@@ -733,20 +610,28 @@ pub enum InteractiveTxMessageSend {
 	TxComplete(msgs::TxComplete),
 }
 
-// TODO: `InteractiveTxConstructor` methods should return an `Err` when the state machine itself
-// errors out. There are two scenarios where that may occur: (1) Invalid data; causing negotiation
-// to abort (2) Illegal state transition. Check spec to see if it dictates what needs to happen
-// if a node receives an unexpected message.
-impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
+macro_rules! do_state_transition {
+	($self: ident, $transition: ident, $msg: expr) => {{
+		let state_machine = core::mem::take(&mut $self.state_machine);
+		$self.state_machine = state_machine.$transition($msg);
+		match &$self.state_machine {
+			StateMachine::NegotiationAborted(_) => Err(()),
+			_ => Ok(()),
+		}
+	}};
+}
+
+// TODO: Check spec to see if it dictates what needs to happen if a node receives an unexpected message.
+impl<ES: Deref> InteractiveTxConstructor<ES>
+where
+	ES::Target: EntropySource,
+{
 	pub fn new(
-		entropy_source: ES, channel_id: [u8; 32], feerate_sat_per_kw: u32, require_confirmed_inputs: bool,
-		is_initiator: bool, base_tx: Transaction, did_send_tx_signatures: bool,
-		inputs_to_contribute: Vec<TxInputWithPrevOutput>, outputs_to_contribute: Vec<TxOut>,
+		entropy_source: ES, channel_id: [u8; 32], feerate_sat_per_kw: u32, is_initiator: bool,
+		tx_locktime: PackedLockTime, inputs_to_contribute: Vec<(TxIn, Transaction)>,
+		outputs_to_contribute: Vec<TxOut>,
 	) -> (Self, Option<InteractiveTxMessageSend>) {
-		let state_machine = StateMachine::new(
-			feerate_sat_per_kw, require_confirmed_inputs, is_initiator, base_tx,
-			did_send_tx_signatures
-		);
+		let state_machine = StateMachine::new(feerate_sat_per_kw, is_initiator, tx_locktime);
 		let mut constructor = Self {
 			state_machine,
 			channel_id,
@@ -756,7 +641,13 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 			outputs_to_contribute,
 		};
 		let message_send = if is_initiator {
-			Some(constructor.generate_message_send().unwrap()) // TODO
+			match constructor.do_local_state_transition() {
+				Ok(msg_send) => Some(msg_send),
+				Err(_) => {
+					debug_assert!(false, "We should always be able to start our state machine successfully");
+					None
+				},
+			}
 		} else {
 			None
 		};
@@ -774,26 +665,17 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 		serial_id
 	}
 
-	// TODO: This also transitions the state machine, come up with a better name.
-	fn generate_message_send(&mut self) -> Result<InteractiveTxMessageSend, ()> {
-		if let Some(input_with_prevout) = self.inputs_to_contribute.pop() {
-			let state_machine = core::mem::take(&mut self.state_machine);
+	fn do_local_state_transition(&mut self) -> Result<InteractiveTxMessageSend, ()> {
+		if let Some((input, prev_tx)) = self.inputs_to_contribute.pop() {
 			let msg = msgs::TxAddInput {
 				channel_id: self.channel_id,
 				serial_id: self.generate_local_serial_id(),
-				// TODO: Needs real transaction and prevout
-				prevtx: msgs::TransactionU16LenLimited(Transaction { version: 0, lock_time: bitcoin::PackedLockTime::ZERO, input: vec![], output: vec![]}),
-				prevtx_out: 0,
-				sequence: Sequence::ENABLE_RBF_NO_LOCKTIME.into(),
+				prevtx: msgs::TransactionU16LenLimited(prev_tx),
+				prevtx_out: input.previous_output.vout,
+				sequence: input.sequence.to_consensus_u32(),
 			};
-			state_machine.send_tx_add_input(&msg)
-				.map(|state_machine| {
-					self.state_machine = state_machine;
-					InteractiveTxMessageSend::TxAddInput(msg)
-				})
-				.map_err(|abort_reason| {
-					self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-				})
+			let _ = do_state_transition!(self, local_tx_add_input, &msg);
+			Ok(InteractiveTxMessageSend::TxAddInput(msg))
 		} else if let Some(output) = self.outputs_to_contribute.pop() {
 			let msg = msgs::TxAddOutput {
 				channel_id: self.channel_id,
@@ -801,93 +683,56 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 				sats: output.value,
 				script: output.script_pubkey,
 			};
-			let state_machine = core::mem::take(&mut self.state_machine);
-			state_machine.send_tx_add_output(&msg)
-				.map(|state_machine| {
-					self.state_machine = state_machine;
-					InteractiveTxMessageSend::TxAddOutput(msg)
-				})
-				.map_err(|abort_reason| {
-					self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-				})
+			let _ = do_state_transition!(self, local_tx_add_output, &msg)?;
+			Ok(InteractiveTxMessageSend::TxAddOutput(msg))
 		} else {
-			// TODO: Double check that we can transition back to Negotiating.
 			let msg = msgs::TxComplete { channel_id: self.channel_id };
-			let state_machine = core::mem::take(&mut self.state_machine);
-			state_machine.send_tx_complete(&msg)
-				.map(|state_machine| {
-					self.state_machine = state_machine;
-					InteractiveTxMessageSend::TxComplete(msg)
-				})
-				.map_err(|abort_reason| {
-					self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-				})
+			let _ = do_state_transition!(self, local_tx_complete, &msg)?;
+			Ok(InteractiveTxMessageSend::TxComplete(msg))
 		}
 	}
 
-	pub fn receive_tx_add_input(&mut self, msg: &msgs::TxAddInput, confirmed: bool) -> Result<InteractiveTxMessageSend, ()> {
-		let state_machine = core::mem::take(&mut self.state_machine);
-		state_machine.receive_tx_add_input(msg, confirmed)
-			.map(|state_machine| { self.state_machine = state_machine; })
-			.map_err(|abort_reason| {
-				self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-			})?;
-		self.generate_message_send()
+	pub fn handle_tx_add_input(&mut self, msg: &msgs::TxAddInput) -> Result<InteractiveTxMessageSend, ()> {
+		do_state_transition!(self, remote_tx_add_input, msg)?;
+		self.do_local_state_transition()
 	}
 
-	pub fn receive_tx_remove_input(&mut self, msg: &msgs::TxRemoveInput) -> Result<InteractiveTxMessageSend, ()> {
-		let state_machine = core::mem::take(&mut self.state_machine);
-		state_machine.receive_tx_remove_input(msg)
-			.map(|state_machine| { self.state_machine = state_machine; })
-			.map_err(|abort_reason| {
-				self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-			})?;
-		self.generate_message_send()
+	pub fn handle_tx_remove_input(&mut self, msg: &msgs::TxRemoveInput) -> Result<InteractiveTxMessageSend, ()> {
+		let _ = do_state_transition!(self, remote_tx_remove_input, msg)?;
+		self.do_local_state_transition()
 	}
 
-	pub fn receive_tx_add_output(&mut self, msg: &msgs::TxAddOutput) -> Result<InteractiveTxMessageSend, ()> {
-		let state_machine = core::mem::take(&mut self.state_machine);
-		state_machine.receive_tx_add_output(msg)
-			.map(|state_machine| { self.state_machine = state_machine; })
-			.map_err(|abort_reason| {
-				self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-			})?;
-		self.generate_message_send()
+	pub fn handle_tx_add_output(&mut self, msg: &msgs::TxAddOutput) -> Result<InteractiveTxMessageSend, ()> {
+		let _ = do_state_transition!(self, remote_tx_add_output, msg)?;
+		self.do_local_state_transition()
 	}
 
-	pub fn receive_tx_remove_output(&mut self, msg: &msgs::TxRemoveOutput) -> Result<InteractiveTxMessageSend, ()> {
-		let state_machine = core::mem::take(&mut self.state_machine);
-		state_machine.receive_tx_remove_output(msg)
-			.map(|state_machine| { self.state_machine = state_machine; })
-			.map_err(|abort_reason| {
-				self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-			})?;
-		self.generate_message_send()
+	pub fn handle_tx_remove_output(&mut self, msg: &msgs::TxRemoveOutput) -> Result<InteractiveTxMessageSend, ()> {
+		let _ = do_state_transition!(self, remote_tx_remove_output, msg)?;
+		self.do_local_state_transition()
 	}
 
-	pub fn receive_tx_complete(&mut self, msg: &msgs::TxComplete) -> Result<Option<InteractiveTxMessageSend>, ()> {
-		let state_machine = core::mem::take(&mut self.state_machine);
-		state_machine.receive_tx_complete(msg)
-			.map(|state_machine| {
-				self.state_machine = state_machine;
-				match &self.state_machine {
-					StateMachine::RemoteTxComplete(c) => {
-						Ok(Some(self.generate_message_send()?))
-						// TODO: Expose built transaction
-					}
-					StateMachine::NegotiationComplete(c) => {
-						// TODO: Expose built transaction
-						Ok(None)
-					}
+	pub fn handle_tx_complete(&mut self, msg: &msgs::TxComplete) -> Result<(Option<InteractiveTxMessageSend>, Option<Transaction>), ()> {
+		let _ = do_state_transition!(self, remote_tx_complete, msg)?;
+		match &self.state_machine {
+			StateMachine::RemoteTxComplete(_) => {
+				let msg_send = self.do_local_state_transition()?;
+				let negotiated_tx = match &self.state_machine {
+					StateMachine::NegotiationComplete(s) => Some(s.0.clone()),
+					StateMachine::LocalChange(_) => None, // We either had an input or output to contribute.
 					_ => {
-						debug_assert!(false);
-						Err(())
+						debug_assert!(false, "We cannot transition to any other states after receiving `tx_complete` and responding");
+						return Err(());
 					}
-				}
-			})
-			.map_err(|abort_reason| {
-				self.state_machine = StateMachine::NegotiationAborted(NegotiationAborted(abort_reason));
-			})?
+				};
+				Ok((Some(msg_send), negotiated_tx))
+			},
+			StateMachine::NegotiationComplete(s) => Ok((None, Some(s.0.clone()))),
+			_ => {
+				debug_assert!(false, "We cannot transition to any other states after receiving `tx_complete`");
+				Err(())
+			}
+		}
 	}
 }
 
@@ -974,4 +819,3 @@ impl<ES: Deref> InteractiveTxConstructor<ES> where ES::Target: EntropySource {
 // 		};
 // 	}
 // }
-
