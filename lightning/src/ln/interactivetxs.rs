@@ -429,6 +429,8 @@ macro_rules! define_state {
 			}
 		}
 	};
+	// TODO: Confusing since state above is the second parameter, but here, it is the first. Let's try to use ty here.
+	// See: https://github.com/lightningdevkit/rust-lightning/blob/448b191fec4c6d1e9638c82aade7385b1516aa5d/lightning-custom-message/src/lib.rs#L245
 	($state: ident, $inner: ident, $doc: expr) => {
 		#[doc = $doc]
 		#[derive(Debug)]
