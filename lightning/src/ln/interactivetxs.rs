@@ -87,28 +87,16 @@ impl NegotiationContext {
 		self.holder_is_initiator == !serial_id.is_valid_for_initiator()
 	}
 
-	fn initiator_inputs_contributed(&self) -> impl Iterator<Item=&TxInputWithPrevOutput> {
+	fn counterparty_inputs_contributed(&self) -> impl Iterator<Item=&TxInputWithPrevOutput> + Clone {
 		self.inputs.iter()
-			.filter(|(serial_id, _)| serial_id.is_valid_for_initiator())
+			.filter(move |(serial_id, _)| self.is_serial_id_valid_for_counterparty(serial_id))
 			.map(|(_, input_with_prevout)| input_with_prevout)
 	}
 
-	fn non_initiator_inputs_contributed(&self) -> impl Iterator<Item=&TxInputWithPrevOutput> {
-		self.inputs.iter()
-			.filter(|(serial_id, _)| !serial_id.is_valid_for_initiator())
+	fn counterparty_outputs_contributed(&self) -> impl Iterator<Item=&TxOut> + Clone{
+		self.outputs.iter()
+			.filter(move |(serial_id, _)| self.is_serial_id_valid_for_counterparty(serial_id))
 			.map(|(_, input_with_prevout)| input_with_prevout)
-	}
-
-	fn initiator_outputs_contributed(&self) -> impl Iterator<Item=&TxOut> {
-		self.outputs.iter()
-			.filter(|(serial_id, _)| serial_id.is_valid_for_initiator())
-			.map(|(_, output)| output)
-	}
-
-	fn non_initiator_outputs_contributed(&self) -> impl Iterator<Item=&TxOut> {
-		self.outputs.iter()
-			.filter(|(serial_id, _)| !serial_id.is_valid_for_initiator())
-			.map(|(_, output)| output)
 	}
 
 	fn remote_tx_add_input(&mut self, msg: &msgs::TxAddInput) -> Result<(), AbortReason> {
@@ -305,21 +293,13 @@ impl NegotiationContext {
 		// MUST fail the negotiation if:
 
 		// - the peer's total input satoshis is less than their outputs
-		let counterparty_input_amount = self.inputs.iter().filter_map(|(serial_id, input)|
-			if self.is_serial_id_valid_for_counterparty(serial_id) {
-				Some(input.prev_output.value)
-			} else {
-				None
-			}
-		).sum();
-		let counterparty_output_amount = self.outputs.iter().filter_map(|(serial_id, output)|
-			if self.is_serial_id_valid_for_counterparty(serial_id) {
-				Some(output.value)
-			} else {
-				None
-			}
-		).sum();
-		if counterparty_input_amount < counterparty_output_amount {
+		let counterparty_inputs_contributed = self.counterparty_inputs_contributed();
+		let counterparty_inputs_value: u64 = counterparty_inputs_contributed.clone()
+			.map(|input| input.prev_output.value).sum();
+		let counterparty_outputs_contributed = self.counterparty_outputs_contributed();
+		let counterparty_outputs_value: u64 = counterparty_outputs_contributed.clone()
+			.map(|output| output.value).sum();
+		if counterparty_inputs_value < counterparty_outputs_value {
 			return Err(AbortReason::OutputsExceedInputs);
 		}
 
@@ -344,70 +324,31 @@ impl NegotiationContext {
 		// - How do we enforce their fees cover the witness without knowing its expected length?
 		// 	 - Read eclair's code to see if they do this?
 		const INPUT_WEIGHT: u64 = (32 + 4 + 4) * WITNESS_SCALE_FACTOR as u64;
-		const OUTPUT_WEIGHT: u64 = 8 * WITNESS_SCALE_FACTOR as u64;
 
 		// - the peer's paid feerate does not meet or exceed the agreed feerate (based on the minimum fee).
-		if self.holder_is_initiator {
-			let non_initiator_total_input_value = self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum();
-			let non_initiator_total_output_value = self.non_initiator_outputs_contributed().map(|output| output.value).sum();
-			let non_initiator_fees_contributed = non_initiator_total_input_value.saturating_sub(non_initiator_total_output_value);
-			let non_initiator_outputs_weight = self.non_initiator_outputs_contributed().map(|output|
-				(8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
-			).sum();
-			let non_initiator_contribution_weight =
-				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT // TODO: Needs to account for witness
-					+ non_initiator_outputs_weight;
-			let required_non_initiator_contribution_fee =
-				self.feerate_sat_per_kw as u64 * 1000 / non_initiator_contribution_weight;
-			if non_initiator_fees_contributed < required_non_initiator_contribution_fee {
-				return Err(AbortReason::InsufficientFees);
-			}
-		} else {
-			let initiator_fees_contributed =
-				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum()
-					- self.initiator_outputs_contributed().map(|output| output.value).sum();
-			let initiator_outputs_weight = self.initiator_outputs_contributed().map(|output|
-				(8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
-			).sum();
-			let initiator_contribution_weight = self.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT + initiator_outputs_weight;
-			let required_initiator_contribution_fee =
-				self.feerate_sat_per_kw as u64 * 1000 / initiator_contribution_weight;
-			let tx_common_fields_weight =
-				(4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) *
-					WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
-			let tx_common_fields_fee = self.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
-			if initiator_fees_contributed < tx_common_fields_fee + required_initiator_contribution_fee {
-				return Err(AbortReason::InsufficientFees);
-			}
+		let counterparty_output_weight_contributed: u64 = counterparty_outputs_contributed.clone().map(|output|
+			(8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) *
+				WITNESS_SCALE_FACTOR as u64
+		).sum();
+		let counterparty_weight_contributed = counterparty_output_weight_contributed +
+			counterparty_outputs_contributed.clone().count() as u64 * INPUT_WEIGHT;
+		let counterparty_fees_contributed =
+			counterparty_inputs_value.saturating_sub(counterparty_outputs_value);
+		let mut required_counterparty_contribution_fee =
+			self.feerate_sat_per_kw as u64 * 1000 / counterparty_weight_contributed;
+		if !self.holder_is_initiator {
+		    // if is the non-initiator:
+		    // 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
+		    // 		input count, output count, locktime)
+		    let tx_common_fields_weight =
+		        (4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) *
+		            WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
+		    let tx_common_fields_fee = self.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
+		    required_counterparty_contribution_fee += tx_common_fields_fee;
 		}
-
-		// let (counterparty_inputs_contributed, counterparty_outputs_contributed) = if self.holder_is_initiator {
-		//     (self.non_initiator_inputs_contributed(), self.non_initiator_outputs_contributed())
-		// } else {
-		//     (self.initiator_inputs_contributed(), self.initiator_outputs_contributed())
-		// };
-		// let counterparty_total_input_value = counterparty_inputs_contributed.map(|input| input.prev_output.value).sum();
-		// let counterparty_total_output_value = counterparty_outputs_contributed.map(|output| output.value).sum();
-		// let counterparty_total_output_weight: u64 = counterparty_outputs_contributed.map(|output|
-		//     (8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
-		// ).sum();
-		// let counterparty_contribution_weight = counterparty_inputs_contributed.count() as u64 * INPUT_WEIGHT + // TODO: Needs to account for witness
-		//     counterparty_total_output_weight;
-		// let mut required_counterparty_contribution_fee = self.feerate_sat_per_kw as u64 * 1000 / counterparty_contribution_weight;
-		// if !self.holder_is_initiator {
-		//     // if is the non-initiator:
-		//     // 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
-		//     // 		input count, output count, locktime)
-		//     let tx_common_fields_weight =
-		//         (4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) *
-		//             WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
-		//     let tx_common_fields_fee = self.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
-		//     required_counterparty_contribution_fee += tx_common_fields_fee;
-		// }
-		// let counterparty_fees_contributed = counterparty_total_input_value.saturating_sub(counterparty_total_output_value);
-		// if counterparty_fees_contributed < required_counterparty_contribution_fee {
-		//     return Err(AbortReason::InsufficientFees);
-		// }
+		if counterparty_fees_contributed < required_counterparty_contribution_fee {
+		    return Err(AbortReason::InsufficientFees);
+		}
 
 		Ok(tx_to_validate)
 	}
@@ -416,12 +357,11 @@ impl NegotiationContext {
 // Channel states that can receive `(send|receive)_tx_(add|remove)_(input|output)`
 trait State {}
 
-trait LocalState {
+trait LocalState: State {
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
 
 trait RemoteState: State {
-	// TODO: Remove State dependency?
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
 
@@ -687,7 +627,7 @@ impl<ES: Deref> InteractiveTxConstructor<ES>
 				prevtx_out: input.previous_output.vout,
 				sequence: input.sequence.to_consensus_u32(),
 			};
-			let _ = do_state_transition!(self, local_tx_add_input, &msg);
+			let _ = do_state_transition!(self, local_tx_add_input, &msg)?;
 			Ok(InteractiveTxMessageSend::TxAddInput(msg))
 		} else if let Some(output) = self.outputs_to_contribute.pop() {
 			let msg = msgs::TxAddOutput {
@@ -706,7 +646,7 @@ impl<ES: Deref> InteractiveTxConstructor<ES>
 	}
 
 	pub fn handle_tx_add_input(&mut self, msg: &msgs::TxAddInput) -> Result<InteractiveTxMessageSend, ()> {
-		do_state_transition!(self, remote_tx_add_input, msg)?;
+		let _ = do_state_transition!(self, remote_tx_add_input, msg)?;
 		self.do_local_state_transition()
 	}
 
