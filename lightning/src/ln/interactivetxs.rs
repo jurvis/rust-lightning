@@ -19,6 +19,8 @@ use crate::ln::msgs::SerialId;
 use crate::sign::EntropySource;
 
 use core::ops::Deref;
+use std::io::sink;
+use bitcoin::consensus::Encodable;
 
 /// The number of received `tx_add_input` messages during a negotiation at which point the
 /// negotiation MUST be failed.
@@ -35,6 +37,7 @@ const MAX_INPUTS_OUTPUTS_COUNT: usize = 252;
 trait SerialIdExt {
 	fn is_valid_for_initiator(&self) -> bool;
 }
+
 impl SerialIdExt for SerialId {
 	fn is_valid_for_initiator(&self) -> bool {
 		self % 2 == 0
@@ -79,30 +82,30 @@ struct NegotiationContext {
 }
 
 impl NegotiationContext {
-	fn is_serial_id_valid_for_counterparty(&self, serial_id: SerialId) -> bool {
+	fn is_serial_id_valid_for_counterparty(&self, serial_id: &SerialId) -> bool {
 		// A received `SerialId`'s parity must match the role of the counterparty.
 		self.holder_is_initiator == !serial_id.is_valid_for_initiator()
 	}
 
-	fn initiator_inputs_contributed(&self) -> impl Iterator<Item = &TxInputWithPrevOutput> {
+	fn initiator_inputs_contributed(&self) -> impl Iterator<Item=&TxInputWithPrevOutput> {
 		self.inputs.iter()
 			.filter(|(serial_id, _)| serial_id.is_valid_for_initiator())
 			.map(|(_, input_with_prevout)| input_with_prevout)
 	}
 
-	fn non_initiator_inputs_contributed(&self) -> impl Iterator<Item = &TxInputWithPrevOutput> {
+	fn non_initiator_inputs_contributed(&self) -> impl Iterator<Item=&TxInputWithPrevOutput> {
 		self.inputs.iter()
 			.filter(|(serial_id, _)| !serial_id.is_valid_for_initiator())
 			.map(|(_, input_with_prevout)| input_with_prevout)
 	}
 
-	fn initiator_outputs_contributed(&self) -> impl Iterator<Item = &TxOut> {
+	fn initiator_outputs_contributed(&self) -> impl Iterator<Item=&TxOut> {
 		self.outputs.iter()
 			.filter(|(serial_id, _)| serial_id.is_valid_for_initiator())
 			.map(|(_, output)| output)
 	}
 
-	fn non_initiator_outputs_contributed(&self) -> impl Iterator<Item = &TxOut> {
+	fn non_initiator_outputs_contributed(&self) -> impl Iterator<Item=&TxOut> {
 		self.outputs.iter()
 			.filter(|(serial_id, _)| !serial_id.is_valid_for_initiator())
 			.map(|(_, output)| output)
@@ -114,7 +117,7 @@ impl NegotiationContext {
 		// mode here since `PeerManager` would already disconnect the peer if the `prevtx` is
 		// invalid; implicitly ending the negotiation.
 
-		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(&msg.serial_id) {
 			// The receiving node:
 			//  - MUST fail the negotiation if:
 			//     - the `serial_id` has the wrong parity
@@ -187,7 +190,7 @@ impl NegotiationContext {
 	}
 
 	fn remote_tx_remove_input(&mut self, msg: &msgs::TxRemoveInput) -> Result<(), AbortReason> {
-		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(&msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
 
@@ -207,7 +210,7 @@ impl NegotiationContext {
 		// The receiving node:
 		//  - MUST fail the negotiation if:
 		//     - the serial_id has the wrong parity
-		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(&msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
 
@@ -254,7 +257,7 @@ impl NegotiationContext {
 	}
 
 	fn remote_tx_remove_output(&mut self, msg: &msgs::TxRemoveOutput) -> Result<(), AbortReason> {
-		if !self.is_serial_id_valid_for_counterparty(msg.serial_id) {
+		if !self.is_serial_id_valid_for_counterparty(&msg.serial_id) {
 			return Err(AbortReason::IncorrectSerialIdParity);
 		}
 		if let Some(_) = self.outputs.remove(&msg.serial_id) {
@@ -298,20 +301,25 @@ impl NegotiationContext {
 	}
 
 	fn build_transaction(self) -> Result<Transaction, AbortReason> {
-		let tx_to_validate = Transaction {
-			version: 2,
-			lock_time: self.tx_locktime,
-			input: self.inputs.values().map(|p| p.input.clone()).collect(),
-			output: self.outputs.values().cloned().collect(),
-		};
-
 		// The receiving node:
 		// MUST fail the negotiation if:
 
 		// - the peer's total input satoshis is less than their outputs
-		let total_input_amount: u64 = self.inputs.values().map(|p| p.prev_output.value).sum();
-		let total_output_amount = tx_to_validate.output.iter().map(|output| output.value).sum();
-		if total_input_amount < total_output_amount {
+		let counterparty_input_amount = self.inputs.iter().filter_map(|(serial_id, input)|
+			if self.is_serial_id_valid_for_counterparty(serial_id) {
+				Some(input.prev_output.value)
+			} else {
+				None
+			}
+		).sum();
+		let counterparty_output_amount = self.outputs.iter().filter_map(|(serial_id, output)|
+			if self.is_serial_id_valid_for_counterparty(serial_id) {
+				Some(output.value)
+			} else {
+				None
+			}
+		).sum();
+		if counterparty_input_amount < counterparty_output_amount {
 			return Err(AbortReason::OutputsExceedInputs);
 		}
 
@@ -321,6 +329,12 @@ impl NegotiationContext {
 			return Err(AbortReason::ExceededNumberOfInputsOrOutputs);
 		}
 
+		let tx_to_validate = Transaction {
+			version: 2,
+			lock_time: self.tx_locktime,
+			input: self.inputs.values().map(|p| p.input.clone()).collect(),
+			output: self.outputs.values().cloned().collect(),
+		};
 		if tx_to_validate.weight() as u32 > MAX_STANDARD_TX_WEIGHT {
 			return Err(AbortReason::TransactionTooLarge);
 		}
@@ -334,27 +348,28 @@ impl NegotiationContext {
 
 		// - the peer's paid feerate does not meet or exceed the agreed feerate (based on the minimum fee).
 		if self.holder_is_initiator {
-			let non_initiator_fees_contributed: u64 =
-				self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>()
-				- self.non_initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
+			let non_initiator_total_input_value = self.non_initiator_inputs_contributed().map(|input| input.prev_output.value).sum();
+			let non_initiator_total_output_value = self.non_initiator_outputs_contributed().map(|output| output.value).sum();
+			let non_initiator_fees_contributed = non_initiator_total_input_value.saturating_sub(non_initiator_total_output_value);
+			let non_initiator_outputs_weight = self.non_initiator_outputs_contributed().map(|output|
+				(8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
+			).sum();
 			let non_initiator_contribution_weight =
-				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT
-				+ self.non_initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
+				self.non_initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT // TODO: Needs to account for witness
+					+ non_initiator_outputs_weight;
 			let required_non_initiator_contribution_fee =
 				self.feerate_sat_per_kw as u64 * 1000 / non_initiator_contribution_weight;
 			if non_initiator_fees_contributed < required_non_initiator_contribution_fee {
 				return Err(AbortReason::InsufficientFees);
 			}
 		} else {
-			// if is the non-initiator:
-			// 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
-			// 		input count, output count, locktime)
-			let initiator_fees_contributed: u64 =
-				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum::<u64>()
-					- self.initiator_outputs_contributed().map(|output| output.value).sum::<u64>();
-			let initiator_contribution_weight =
-				self.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT +
-					self.initiator_outputs_contributed().count() as u64 * OUTPUT_WEIGHT;
+			let initiator_fees_contributed =
+				self.initiator_inputs_contributed().map(|input| input.prev_output.value).sum()
+					- self.initiator_outputs_contributed().map(|output| output.value).sum();
+			let initiator_outputs_weight = self.initiator_outputs_contributed().map(|output|
+				(8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
+			).sum();
+			let initiator_contribution_weight = self.initiator_inputs_contributed().count() as u64 * INPUT_WEIGHT + initiator_outputs_weight;
 			let required_initiator_contribution_fee =
 				self.feerate_sat_per_kw as u64 * 1000 / initiator_contribution_weight;
 			let tx_common_fields_weight =
@@ -366,49 +381,47 @@ impl NegotiationContext {
 			}
 		}
 
+		// let (counterparty_inputs_contributed, counterparty_outputs_contributed) = if self.holder_is_initiator {
+		//     (self.non_initiator_inputs_contributed(), self.non_initiator_outputs_contributed())
+		// } else {
+		//     (self.initiator_inputs_contributed(), self.initiator_outputs_contributed())
+		// };
+		// let counterparty_total_input_value = counterparty_inputs_contributed.map(|input| input.prev_output.value).sum();
+		// let counterparty_total_output_value = counterparty_outputs_contributed.map(|output| output.value).sum();
+		// let counterparty_total_output_weight: u64 = counterparty_outputs_contributed.map(|output|
+		//     (8 /* value */ + output.script_pubkey.consensus_encode(&mut sink()).unwrap() as u64) * WITNESS_SCALE_FACTOR
+		// ).sum();
+		// let counterparty_contribution_weight = counterparty_inputs_contributed.count() as u64 * INPUT_WEIGHT + // TODO: Needs to account for witness
+		//     counterparty_total_output_weight;
+		// let mut required_counterparty_contribution_fee = self.feerate_sat_per_kw as u64 * 1000 / counterparty_contribution_weight;
+		// if !self.holder_is_initiator {
+		//     // if is the non-initiator:
+		//     // 	- the initiator's fees do not cover the common fields (version, segwit marker + flag,
+		//     // 		input count, output count, locktime)
+		//     let tx_common_fields_weight =
+		//         (4 /* version */ + 4 /* locktime */ + 1 /* input count */ + 1 /* output count */) *
+		//             WITNESS_SCALE_FACTOR as u64 + 2 /* segwit marker + flag */;
+		//     let tx_common_fields_fee = self.feerate_sat_per_kw as u64 * 1000 / tx_common_fields_weight;
+		//     required_counterparty_contribution_fee += tx_common_fields_fee;
+		// }
+		// let counterparty_fees_contributed = counterparty_total_input_value.saturating_sub(counterparty_total_output_value);
+		// if counterparty_fees_contributed < required_counterparty_contribution_fee {
+		//     return Err(AbortReason::InsufficientFees);
+		// }
+
 		Ok(tx_to_validate)
 	}
 }
 
-//                   Interactive Transaction Construction negotiation
-//                           from the perspective of a holder
-//
-//                               LocalState
-//                        ┌──────────────────────────────┐
-//                        │                              │
-//                        │           ┌────────────────┐ │
-//                        │           │(sent/received) │ │
-//                        │           │tx_add_input    │ │
-//                        │           │tx_add_output   │ │
-//                        │           │tx_remove_input │ │
-//                        │           │tx_remove_output│ │
-//                        │           └───┐       ┌────┘ │
-//                        │               │       ▼      │
-//            ────────────┼──────────►┌───┴───────────┐  │        received_tx_complete                   ┌─────────────────────┐
-//    accept_channel2     │           │               ├──┼───────────────────┐          sent_tx_complete │                     │
-// or splice_ack          │     ┌─────┤  Negotiating  │  │                   ▼          ┌───────────────►│ NegotiationComplete │◄──┐
-// or tx_ack_rbf          │     │     │               │  │          ┌─────────────────┐ │                │                     │   │
-//    (sent or received)  │     │ ┌──►└───────────────┘  │          │                 │ │                └─────────────────────┘   │
-//                              │ │                      │          │ RemoteTxComplete ├─┘                                          │
-//             sent_tx_complete │ │ received_tx_add_*    │          │                 │                   ┌────────────────────┐   │
-//                              │ │ received_tx_remove_* │          └─────────────────┘                   │                    │   │
-//                        │     │ │                      │                                            ┌──►│ NegotiationAborted │   │
-//                        │     │ └───┬───────────────┐  │        (sent/received)_tx_abort            │   │                    │   │
-//                        │     │     │               │  ├────────────────────────────────────────────┘   └────────────────────┘   │
-//                        │     └────►│ LocalTxComplete │  │                                                                         │
-//                        │           │               ├──┼──┐                                                                      │
-//                        │           └───────────────┘  │  └──────────────────────────────────────────────────────────────────────┘
-//                        │                              │                         received_tx_complete
-//                        │                              │
-//                        └──────────────────────────────┘
-//
-
 // Channel states that can receive `(send|receive)_tx_(add|remove)_(input|output)`
 trait State {}
+
 trait LocalState {
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
+
 trait RemoteState: State {
+	// TODO: Remove State dependency?
 	fn into_negotiation_context(self) -> NegotiationContext;
 }
 
@@ -429,8 +442,6 @@ macro_rules! define_state {
 			}
 		}
 	};
-	// TODO: Confusing since state above is the second parameter, but here, it is the first. Let's try to use ty here.
-	// See: https://github.com/lightningdevkit/rust-lightning/blob/448b191fec4c6d1e9638c82aade7385b1516aa5d/lightning-custom-message/src/lib.rs#L245
 	($state: ident, $inner: ident, $doc: expr) => {
 		#[doc = $doc]
 		#[derive(Debug)]
@@ -595,8 +606,8 @@ impl StateMachine {
 }
 
 pub struct InteractiveTxConstructor<ES: Deref>
-where
-	ES::Target: EntropySource,
+	where
+		ES::Target: EntropySource,
 {
 	state_machine: StateMachine,
 	channel_id: [u8; 32],
@@ -625,8 +636,8 @@ macro_rules! do_state_transition {
 
 // TODO: Check spec to see if it dictates what needs to happen if a node receives an unexpected message.
 impl<ES: Deref> InteractiveTxConstructor<ES>
-where
-	ES::Target: EntropySource,
+	where
+		ES::Target: EntropySource,
 {
 	pub fn new(
 		entropy_source: ES, channel_id: [u8; 32], feerate_sat_per_kw: u32, is_initiator: bool,
@@ -648,7 +659,7 @@ where
 				Err(_) => {
 					debug_assert!(false, "We should always be able to start our state machine successfully");
 					None
-				},
+				}
 			}
 		} else {
 			None
@@ -728,7 +739,7 @@ where
 					}
 				};
 				Ok((Some(msg_send), negotiated_tx))
-			},
+			}
 			StateMachine::NegotiationComplete(s) => Ok((None, Some(s.0.clone()))),
 			_ => {
 				debug_assert!(false, "We cannot transition to any other states after receiving `tx_complete`");
