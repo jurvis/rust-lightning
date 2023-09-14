@@ -21,6 +21,7 @@ use crate::sign::EntropySource;
 use core::ops::Deref;
 use std::io::sink;
 use bitcoin::consensus::Encodable;
+use crate::util::ser::TransactionU16LenLimited;
 
 /// The number of received `tx_add_input` messages during a negotiation at which point the
 /// negotiation MUST be failed.
@@ -623,7 +624,7 @@ impl<ES: Deref> InteractiveTxConstructor<ES>
 			let msg = msgs::TxAddInput {
 				channel_id: self.channel_id,
 				serial_id: self.generate_local_serial_id(),
-				prevtx: msgs::TransactionU16LenLimited(prev_tx),
+				prevtx: TransactionU16LenLimited(prev_tx),
 				prevtx_out: input.previous_output.vout,
 				sequence: input.sequence.to_consensus_u32(),
 			};
